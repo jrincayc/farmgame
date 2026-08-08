@@ -1,0 +1,26 @@
+[package]
+name = "farmgame"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Exact-pinned per project decision: Bevy's ecosystem moves fast between
+# versions, and we'd rather have a `cargo update` fail loudly (needs a
+# manual bump + review) than silently pull in breaking API changes
+# mid-project.
+bevy = { version = "=0.16.0", default-features = true }
+# 0.34.x is the bevy_egui release line that targets Bevy 0.16.
+bevy_egui = "=0.34.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+# Bevy in pure debug mode is noticeably slow (especially asset loading /
+# rendering). Opt incremental compiles for iteration speed but optimize
+# dependencies, which is the standard Bevy-recommended dev profile.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
