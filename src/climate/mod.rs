@@ -100,7 +100,10 @@ impl Default for Region {
 /// (soil moisture, crop stress) read.
 #[derive(Resource, Debug, Clone, Default)]
 pub struct WeatherToday {
-    /// 0.0–1.0, added to soil moisture that day (design doc §3.4).
+    /// 0.0–1.0, added to soil moisture that day (design doc §3.4). Zero
+    /// on days it doesn't rain at all — see `RAIN_CHANCE_PER_DAY` below;
+    /// this isn't a uniform daily roll, since real precipitation is
+    /// intermittent rather than "a little every day."
     pub rainfall: f32,
     pub is_frost: bool,
 }
@@ -115,6 +118,15 @@ fn day_of_year(day: u32, year_length: u32) -> u32 {
         day % year_length
     }
 }
+
+/// Chance that any given day has rain at all. Gated separately from the
+/// rainfall *amount* below so most days come out bone dry rather than
+/// every day getting a small drizzle — a placeholder like the other
+/// numbers flagged in design doc §5; requirements §4.4's seasonal
+/// drought/frost risk would mean varying this by day-of-year rather than
+/// using one constant, which is a natural follow-up once soil moisture
+/// (Phase 3) gives a reason to care about the difference.
+const RAIN_CHANCE_PER_DAY: f64 = 0.35;
 
 /// Chance that a day inside `Region.frost_days` actually produces frost,
 /// rather than every such day being frost automatically. A placeholder
@@ -146,7 +158,16 @@ fn advance_day(
         let doy = day_of_year(ev.new_day, calendar.year_length);
         let mut rng = rand::thread_rng();
 
-        weather.rainfall = rng.gen_range(0.0_f32..=1.0_f32);
+        // Two-stage roll: does it rain at all today, and if so, how
+        // much? Rolling a single continuous 0.0..=1.0 value every day
+        // (the original approach) meant every day got *some* rainfall,
+        // just sometimes a trace amount — this instead gives most days
+        // zero, with real rain on the days it does happen.
+        weather.rainfall = if rng.gen_bool(RAIN_CHANCE_PER_DAY) {
+            rng.gen_range(0.0_f32..=1.0_f32)
+        } else {
+            0.0
+        };
         weather.is_frost =
             region.frost_days.contains(&doy) && rng.gen_bool(FROST_CHANCE_ON_RISK_DAY);
     }
@@ -201,6 +222,14 @@ mod tests {
         // A pure function shouldn't panic on bad input, even though
         // Calendar's own default never produces year_length == 0.
         assert_eq!(day_of_year(5, 0), 0);
+    }
+
+    #[test]
+    fn rain_and_frost_chance_constants_are_valid_probabilities() {
+        // Cheap guard against a typo (e.g. 3.5 instead of 0.35) rather
+        // than a meaningful statistical test of the RNG itself.
+        assert!((0.0..=1.0).contains(&RAIN_CHANCE_PER_DAY));
+        assert!((0.0..=1.0).contains(&FROST_CHANCE_ON_RISK_DAY));
     }
 
     #[test]
