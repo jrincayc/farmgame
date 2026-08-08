@@ -15,6 +15,10 @@ bevy_egui = "=0.34.1"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Bounded random weather rolls (requirements §4.4). Already present
+# transitively via bevy_math/glam at 0.8.x - pinning "0.8" here just
+# makes it a direct, intentional dependency rather than an implicit one.
+rand = "0.8"
 
 [profile.dev]
 # Bevy in pure debug mode is noticeably slow (especially asset loading /

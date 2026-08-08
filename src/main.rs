@@ -1,9 +1,10 @@
 //! Farm sim entry point.
 //!
-//! Phase 1 scope: just the time/calendar skeleton (design doc §1, §2.1,
-//! §2.1a). No rendering of the farm itself yet — this exists to prove
-//! the plugin wiring and `DayAdvanced` event chain work before climate,
-//! farm, and crops build on top of it in later phases.
+//! Phase 2 scope: time/calendar skeleton (Phase 1) plus region climate
+//! and daily weather (design doc §2.2, §3.4). Still no rendering of the
+//! farm itself — this exists to prove the `DayAdvanced` chain now
+//! reaches climate in the right order before farm/crops build on top of
+//! it in later phases.
 //!
 //! Run with `cargo run`. With no UI yet, `TimeControl` defaults to
 //! Paused, so nothing will happen on its own — press keys per the log
@@ -11,27 +12,40 @@
 
 use bevy::prelude::*;
 
+mod climate;
+mod sim_order;
 mod time;
 
+use climate::{ClimatePlugin, Region, WeatherToday};
 use time::{Calendar, DayAdvanced, StepDayRequested, TimeControl, TimeMode, TimePlugin, TimerSpeed};
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Farm Sim (dev)".to_string(),
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "Farm Sim (dev)".to_string(),
             ..default()
-        }))
-        .add_plugins(TimePlugin)
-        .add_systems(Startup, print_dev_controls)
-        .add_systems(Update, (dev_keyboard_controls, log_day_advanced))
-        .run();
+        }),
+        ..default()
+    }))
+    .add_plugins(TimePlugin)
+    .add_plugins(ClimatePlugin)
+    .add_systems(Startup, print_dev_controls)
+    .add_systems(Update, dev_keyboard_controls)
+    // Runs after climate's DayAdvanced listener so the weather/temp it
+    // prints reflects the day just rolled, not the previous day's.
+    .add_systems(
+        Update,
+        log_day_advanced.after(sim_order::DayAdvanceOrder::Climate),
+    );
+
+    sim_order::configure(&mut app);
+
+    app.run();
 }
 
 fn print_dev_controls() {
-    info!("=== Farm Sim dev build (Phase 1: time skeleton) ===");
+    info!("=== Farm Sim dev build (Phase 2: climate + weather) ===");
     info!("No UI yet - temporary keyboard controls:");
     info!("  Space : request a single day Step");
     info!("  1 / 2 / 3 : switch to Timer mode at Slow / Normal / Fast");
@@ -76,11 +90,18 @@ fn dev_keyboard_controls(
     }
 }
 
-fn log_day_advanced(mut events: EventReader<DayAdvanced>, calendar: Res<Calendar>) {
+fn log_day_advanced(
+    mut events: EventReader<DayAdvanced>,
+    calendar: Res<Calendar>,
+    region: Res<Region>,
+    weather: Res<WeatherToday>,
+) {
     for ev in events.read() {
+        let day_of_year = ev.new_day % calendar.year_length.max(1);
+        let temp = region.base_temp_curve.temp_on(day_of_year, calendar.year_length);
         info!(
-            "DayAdvanced -> day {} (year_length {})",
-            ev.new_day, calendar.year_length
+            "DayAdvanced -> day {} (year_length {}) | temp {:.1}C | rainfall {:.2} | frost {}",
+            ev.new_day, calendar.year_length, temp, weather.rainfall, weather.is_frost
         );
     }
 }
