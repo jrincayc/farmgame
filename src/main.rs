@@ -1,10 +1,11 @@
 //! Farm sim entry point.
 //!
-//! Phase 2 scope: time/calendar skeleton (Phase 1) plus region climate
-//! and daily weather (design doc §2.2, §3.4). Still no rendering of the
-//! farm itself — this exists to prove the `DayAdvanced` chain now
-//! reaches climate in the right order before farm/crops build on top of
-//! it in later phases.
+//! Phase 3 scope: time (Phase 1) + climate/weather (Phase 2) + farm
+//! tiles and soil (Phase 3, design doc §2.3, §2.3a). Still no rendering
+//! of the farm itself — this exists to prove the `DayAdvanced` chain
+//! now reaches farm in the right order (after climate, so soil moisture
+//! reacts to the day's already-rolled rainfall) before crops build on
+//! top of it in Phase 4.
 //!
 //! Run with `cargo run`. With no UI yet, `TimeControl` defaults to
 //! Paused, so nothing will happen on its own — press keys per the log
@@ -13,10 +14,12 @@
 use bevy::prelude::*;
 
 mod climate;
+mod farm;
 mod sim_order;
 mod time;
 
 use climate::{ClimatePlugin, Region, WeatherToday};
+use farm::{FarmPlugin, SoilState};
 use time::{Calendar, DayAdvanced, StepDayRequested, TimeControl, TimeMode, TimePlugin, TimerSpeed};
 
 fn main() {
@@ -30,6 +33,7 @@ fn main() {
     }))
     .add_plugins(TimePlugin)
     .add_plugins(ClimatePlugin)
+    .add_plugins(FarmPlugin)
     .add_systems(Startup, print_dev_controls)
     .add_systems(Update, dev_keyboard_controls)
     // Runs after climate's DayAdvanced listener so the weather/temp it
@@ -37,6 +41,12 @@ fn main() {
     .add_systems(
         Update,
         log_day_advanced.after(sim_order::DayAdvanceOrder::Climate),
+    )
+    // Runs after farm's DayAdvanced listener for the same reason -
+    // otherwise the printed soil averages would lag a day behind.
+    .add_systems(
+        Update,
+        log_soil_summary.after(sim_order::DayAdvanceOrder::Farm),
     );
 
     sim_order::configure(&mut app);
@@ -45,7 +55,7 @@ fn main() {
 }
 
 fn print_dev_controls() {
-    info!("=== Farm Sim dev build (Phase 2: climate + weather) ===");
+    info!("=== Farm Sim dev build (Phase 3: farm tiles + soil) ===");
     info!("No UI yet - temporary keyboard controls:");
     info!("  Space : request a single day Step");
     info!("  1 / 2 / 3 : switch to Timer mode at Slow / Normal / Fast");
@@ -104,4 +114,31 @@ fn log_day_advanced(
             ev.new_day, calendar.year_length, temp, weather.rainfall, weather.is_frost
         );
     }
+}
+
+/// Dev-only console summary so Phase 3's soil simulation is observable
+/// before any UI exists, matching the pattern used for climate/weather
+/// in Phase 2. Prints the farm-wide average fertility/moisture rather
+/// than every tile, since even the MVP default (64x64 = 4,096 tiles)
+/// would flood the console otherwise.
+fn log_soil_summary(mut events: EventReader<DayAdvanced>, tiles: Query<&SoilState>) {
+    if events.read().next().is_none() {
+        return;
+    }
+
+    let count = tiles.iter().count();
+    if count == 0 {
+        return;
+    }
+
+    let (fertility_sum, moisture_sum) = tiles
+        .iter()
+        .fold((0.0, 0.0), |(f, m), soil| (f + soil.fertility, m + soil.moisture));
+
+    info!(
+        "  soil avg -> fertility {:.3} | moisture {:.3} (across {} tiles)",
+        fertility_sum / count as f32,
+        moisture_sum / count as f32,
+        count
+    );
 }

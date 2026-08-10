@@ -18,8 +18,8 @@ use crate::time::TimeSystems;
 pub enum DayAdvanceOrder {
     /// climate::advance_day (Phase 2)
     Climate,
-    // /// farm::degrade_soil (Phase 3)
-    // Farm,
+    /// farm::degrade_soil (Phase 3)
+    Farm,
     // /// crops::process_action_queue (Phase 4)
     // CropsQueue,
     // /// crops::tick_growth (Phase 4)
@@ -38,6 +38,12 @@ pub enum DayAdvanceOrder {
 pub fn configure(app: &mut App) {
     app.configure_sets(
         Update,
-        (TimeSystems::Trigger, DayAdvanceOrder::Climate, TimeSystems::Apply).chain(),
+        (
+            TimeSystems::Trigger,
+            DayAdvanceOrder::Climate,
+            DayAdvanceOrder::Farm,
+            TimeSystems::Apply,
+        )
+            .chain(),
     );
 }
