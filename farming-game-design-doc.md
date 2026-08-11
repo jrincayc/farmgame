@@ -172,9 +172,9 @@ Querying "all tiles with soil but no crop" or "all planted, matured crops" becom
 
 ### 2.3a Soil Dynamics
 
-`SoilState.fertility` was previously undefined behavior — the day-advance diagram (§1.1) named `farm::degrade_soil` but no formula existed, and the prototype spike left fertility static. This fills that gap.
+`SoilState.fertility` was previously undefined behavior — the day-advance diagram (§1.1) named `farm::degrade_soil` but no formula existed, and the prototype spike left fertility static. This fills that gap. **Implemented in Phase 3** (fallow-tile half only — see below).
 
-**While a tile has a `PlantedCrop`:** each `DayAdvanced`, that tile's `SoilState.fertility` changes by `def.fertility_impact_per_day` (§2.4). Positive values (most crops) drain the soil; negative values (legumes, cover crops) replenish it. This is the same "declare tolerance/impact as data, let outcomes emerge from comparison" approach already used for climate suitability (§4.3a of the requirements doc) — crop rotation isn't a system to build, it's a consequence of players sequencing crops with complementary `fertility_impact_per_day` values.
+**While a tile has a `PlantedCrop`:** each `DayAdvanced`, that tile's `SoilState.fertility` changes by `def.fertility_impact_per_day` (§2.4). Positive values (most crops) drain the soil; negative values (legumes, cover crops) replenish it. This is the same "declare tolerance/impact as data, let outcomes emerge from comparison" approach already used for climate suitability (§4.3a of the requirements doc) — crop rotation isn't a system to build, it's a consequence of players sequencing crops with complementary `fertility_impact_per_day` values. **Not yet implemented** — needs `PlantedCrop`/`CropDef`, which land in Phase 4. Until then, every tile is treated as fallow, which is accurate since nothing can be planted yet.
 
 **While a tile is fallow (no `PlantedCrop`):** fertility drifts back toward a baseline (e.g. 0.6) at a rate depending on `SoilType` (§2.3) — e.g. Loamy regenerates fastest, Sandy slowest. This is the first real use of `SoilType` beyond being an inert label.
 
@@ -188,16 +188,26 @@ fn degrade_soil(
             Some(crop) => crop_defs.get(&crop.def)
                 .map(|def| def.fertility_impact_per_day)
                 .unwrap_or(0.0),
-            None => soil.soil_type.fallow_regen_rate(), // e.g. Loamy: +0.01, Sandy: +0.003
+            None => {
+                // Drift toward FALLOW_FERTILITY_BASELINE (e.g. 0.6),
+                // not a flat additive constant - see correction note
+                // below for why this matters.
+                let rate = soil.soil_type.fallow_regen_rate(); // e.g. Loamy: 0.05, Sandy: 0.015
+                (FALLOW_FERTILITY_BASELINE - soil.fertility) * rate
+            }
         };
         soil.fertility = (soil.fertility + delta).clamp(0.0, 1.0);
     }
 }
 ```
 
+**Phase 3 correction:** an earlier draft of this pseudocode used a flat `soil.soil_type.fallow_regen_rate()` as the delta directly (e.g. "Loamy: +0.01, Sandy: +0.003"), independent of the tile's current fertility. That doesn't drift toward a baseline at all — it's a constant positive delta every day, so fertility would just climb until clamped at 1.0, contradicting this section's own prose. The corrected formula above — `delta = (baseline − fertility) × rate` — is what actually produces "drifts back toward a baseline and levels off there," and is what Phase 3 implements. A regression test (`fertility_settles_near_baseline_rather_than_maxing_out`) guards against reintroducing the flat-delta version.
+
 Runs on `DayAdvanced`, ordered before `tick_growth` per §1.1's existing chain (fertility for the day should be settled before growth reads it).
 
 Exact regen rates and `fertility_impact_per_day` values per crop are a playtesting question (§5), same as the quality-threshold and equipment-capacity numbers already flagged there.
+
+**Moisture (Phase 3, new — not in the original design):** the design doc didn't previously specify a moisture formula beyond "affected by weather" (§3.4). Phase 3 implements it alongside fertility, in the same `degrade_soil` system: each `DayAdvanced`, `SoilState.moisture` changes by `weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION`, clamped to `[0.0, 1.0]`. `RAINFALL_TO_MOISTURE` (fraction of rolled rainfall that actually reaches the soil, vs. runoff) and `DAILY_EVAPORATION` (moisture lost on a dry day) are both placeholders alongside the other tunables flagged in §5. There's no watering/irrigation input yet — that's the action-queue `Water` action in Phase 4 (requirements §4.2's "irrigation or manual watering as a moisture mechanic").
 
 ### 2.4 Crops (Bevy Assets + Component)
 
@@ -533,12 +543,14 @@ Harvesting late (after `optimal_harvest_window_days` has elapsed since maturity)
 
 ### 3.4 Weather (on `DayAdvanced`, before growth tick)
 
-MVP weather is simple: roll a bounded random value per day (affecting `SoilState.moisture` deltas), check `Region.frost_days` for frost risk. No separate weather "system" beyond a `WeatherToday` resource that other systems read.
+**Implemented in Phase 2.** MVP weather: check `Region.frost_days` for frost risk (with a per-risk-day probability roll, not automatic — `FROST_CHANCE_ON_RISK_DAY`, a §5-style placeholder), and roll rainfall (affecting `SoilState.moisture` deltas). No separate weather "system" beyond a `WeatherToday` resource that other systems read.
+
+**Rainfall correction (Phase 2):** an earlier draft rolled a single continuous `0.0..=1.0` value every day, which meant every day got *some* rainfall, just sometimes a trace amount. Real precipitation is intermittent, not "a little every day," so this is a two-stage roll instead: first, does it rain at all today (`RAIN_CHANCE_PER_DAY`, another placeholder — most days come out dry); only if that passes does it roll the `0.0..=1.0` amount. Otherwise `rainfall` is `0.0`.
 
 ```rust
 #[derive(Resource)]
 pub struct WeatherToday {
-    pub rainfall: f32,      // 0.0–1.0, added to soil moisture that day
+    pub rainfall: f32,      // 0.0–1.0, added to soil moisture that day; 0.0 on non-rain days
     pub is_frost: bool,
 }
 ```
