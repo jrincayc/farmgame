@@ -247,22 +247,38 @@ mod tests {
     use super::*;
     use crate::climate::ClimatePlugin;
     use crate::crops::CropsPlugin;
+    use crate::economy::EconomyPlugin;
     use crate::time::{StepDayRequested, TimePlugin};
     use std::collections::HashSet;
 
     fn test_app(config: FarmConfig) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
+        // AssetPlugin (normally pulled in by DefaultPlugins, which
+        // these tests deliberately avoid for speed) provides the
+        // AssetServer resource. CropsPlugin::build calls
+        // init_asset_loader::<CropDefLoader>(), which panics without
+        // AssetServer already present - init_asset::<CropDef>() alone
+        // (registering the Assets<CropDef> resource) isn't enough.
+        // MinimalPlugins doesn't include AssetPlugin, so it's added
+        // explicitly here, ahead of CropsPlugin.
+        app.add_plugins(bevy::asset::AssetPlugin::default());
         app.add_plugins(TimePlugin);
         app.add_plugins(ClimatePlugin);
         // CropsPlugin registers the CropDef asset type/loader that
         // degrade_soil's Res<Assets<CropDef>> param needs to exist as a
         // resource, even though these farm-module tests never actually
         // load a crop (every tile stays fallow, same as Phase 3's
-        // tests) - AssetPlugin (from DefaultPlugins, not present under
-        // MinimalPlugins) would normally register Assets<T> machinery,
-        // so CropsPlugin's init_asset::<CropDef>() covers that gap here.
+        // tests).
         app.add_plugins(CropsPlugin);
+        // CropsPlugin also registers process_action_queue (via
+        // CropsQueuePlugin), which reads/writes Wallet and Inventory -
+        // both from EconomyPlugin, not CropsPlugin itself. The queue
+        // stays empty in every farm test below, so this system is a
+        // no-op each run, but Bevy still validates its resource params
+        // exist before running it, so the resources have to be present
+        // regardless of whether anything's actually queued.
+        app.add_plugins(EconomyPlugin);
         app.add_plugins(FarmPlugin);
         crate::sim_order::configure(&mut app);
         // Overwrites the FarmConfig that FarmPlugin::build already
