@@ -322,25 +322,43 @@ Example `assets/crops/tomato.json`:
 
 **Phase 4 note:** `Wallet` is implemented now, as a stub — Phase 4's `Plant` action needs somewhere to deduct `seed_cost` from, and `Harvest` needs an `Inventory` (§2.4's harvested-goods store, not shown separately here since it's a straightforward `HashMap<String, Vec<HarvestedLot>>` keyed by crop id) to add quality-tagged yield to. `Market` and `sale_value()` below are still Phase 5 — there's no selling flow yet, just the wallet/inventory bookkeeping the queue needs to run.
 
+**Phase 5 — implemented, and the pending design question is resolved.** The end of Phase 4 flagged an open question: does selling go through `ActionQueue`/`Equipment` capacity (a `Sell` `ActionKind`) or is it instant? **Resolved: instant, not queued.** Equipment capacity (§2.6) models physical fieldwork *on tiles* — tilling, planting, harvesting. Selling already-harvested goods sitting in `Inventory` isn't fieldwork; it has no tile to target at all, and it's a transaction against a market rather than labor. Harvesting is already capacity-limited (`ActionKind::Harvest`), so the "respect the player's time" pillar (§2 pillar 3) is already served upstream of the sale itself — folding `Sell` into the queue would conflate two different constraints (equipment-days vs. money) for no gameplay benefit at MVP scope. Selling is fired via a `SellRequested { crop_id }` event and resolved the same frame it's sent, not gated on `DayAdvanced`.
+
+**Phase 5 — sells all lots of a crop at once, not per-lot/per-quality.** Selling individual lots (e.g. holding Premium stock while dumping Poor stock) is a plausible stretch, but MVP doesn't need the extra UI/complexity `Inventory::harvested` already keeps lots separate per harvest (rather than merging into one running total), specifically so a later per-lot sell is additive — filtering which lots get drained before the same per-lot valuation loop, not a rewrite.
+
 ```rust
 #[derive(Resource)]
 pub struct Wallet {
     pub money: u32,
 }
 
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct Market {
-    pub price_modifiers: HashMap<String, f32>, // crop id -> time_factor multiplier; all 1.0 for MVP
+    pub price_modifiers: HashMap<String, f32>, // crop id -> time_factor multiplier; absent = 1.0 for MVP
 }
 
-pub fn sale_value(crop_id: &str, base_sell_price: u32, quality: QualityGrade, market: &Market) -> f32 {
-    let quality_multiplier = quality.multiplier();                       // Poor 0.5 / Good 1.0 / Premium 1.5
-    let time_factor = market.price_modifiers.get(crop_id).copied().unwrap_or(1.0); // fixed 1.0 for MVP
-    base_sell_price as f32 * quality_multiplier * time_factor
+impl Market {
+    pub fn time_factor(&self, crop_id: &str) -> f32 {
+        self.price_modifiers.get(crop_id).copied().unwrap_or(1.0)
+    }
 }
+
+pub fn sale_value(base_sell_price: u32, quality: QualityGrade, time_factor: f32) -> f32 {
+    base_sell_price as f32 * quality.multiplier() * time_factor  // Poor 0.5x / Good 1.0x / Premium 1.5x
+}
+
+#[derive(Event)]
+pub struct SellRequested { pub crop_id: String }
+
+// process_sell_requests (Update, not DayAdvanced-gated): for each
+// SellRequested, drain all Inventory lots for crop_id, sum
+// sale_value(def.sell_price, lot.quality, market.time_factor(crop_id)) * lot.quantity
+// across them, credit the rounded total to Wallet.money. Looks up
+// CropDef by scanning Assets<CropDef> for a matching `id` field, since
+// Inventory only stores the id string (§2.4/§2.8), not a Handle.
 ```
 
-`Market::price_modifiers` exists as a real field from day one, just pinned to `1.0` everywhere for MVP. This is deliberate: the **stretch-goal futures market / variable pricing** (§7 of the requirements doc) becomes "make something else write into this map over time," not a new field or a rewrite of `sale_value`.
+`Market::price_modifiers` exists as a real field from day one, just pinned to `1.0` everywhere for MVP (via `time_factor()`'s `unwrap_or(1.0)` default, rather than requiring every crop id to be pre-populated). This is deliberate: the **stretch-goal futures market / variable pricing** (§7 of the requirements doc) becomes "make something else write into this map over time," not a new field or a rewrite of `sale_value`.
 
 ### 2.6 Equipment & Purchasable Structures (Resource + Component)
 
@@ -637,7 +655,7 @@ pub struct WeatherToday {
 - **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.
 - **Equipment upgrades:** `Equipment::daily_capacity` (§2.6) is written as a `HashMap` specifically so a purchase can just increase a value in it — no structural change needed when upgrades are added. **Implemented (fixed, non-purchasable) in Phase 4.**
 - **Greenhouses (§4.3a):** `TileClimateModifier` is defined in §2.3, and `Structure` (§2.6) is shaped to spawn one per covered tile, but neither is wired into a purchase flow or the growth-tick lookup yet. Growth tick already has the comment marking where it plugs in.
-- **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5) — `Market`/`sale_value()`/selling remain Phase 5.
+- **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5). **Phase 5:** `Market`/`sale_value()`/the sell flow are now implemented (instant, not queued — see §2.5's resolved design question); the futures-market stretch goal remains exactly "write non-1.0 values into `price_modifiers`," unchanged by Phase 5's work.
 - **Multi-region:** `Region` as a singleton `Resource` is an MVP simplification; the `temp_on()` function itself doesn't assume singleton-ness, so multi-region later means changing *how Region is looked up* (per-farm entity vs. global resource), not the climate math.
 
 ---

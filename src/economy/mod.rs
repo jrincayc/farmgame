@@ -1,11 +1,18 @@
-//! Economy (design doc §2.5; requirements §4.5) - **Phase 4 stub.**
+//! Economy (design doc §2.5; requirements §4.5).
 //!
-//! Full economy (Phase 5) adds `Market`/`sale_value()` and a buy/sell UI
-//! flow on top of these. For now, `Wallet` and `Inventory` exist just
-//! far enough to let the Phase 4 action queue deduct `seed_cost` on
-//! Plant and store harvested goods on Harvest (design doc §3.1, §3.3) -
-//! there's deliberately no selling flow yet, since that's Phase 5's
-//! `Market`/pricing work, not a Phase 4 concern.
+//! **Phase 4** stubbed `Wallet`/`Inventory` just far enough for the
+//! action queue to deduct `seed_cost` on Plant and store harvested goods
+//! on Harvest. **Phase 5** adds the other half: `Market`/`sale_value`
+//! (`market.rs`) and the instant sell flow (`sell.rs`) that turns
+//! `Inventory` lots into `Wallet` money. See `sell.rs`'s module doc for
+//! the resolved "does selling go through the action queue?" question
+//! left open at the end of Phase 4 - it doesn't.
+
+pub mod market;
+pub mod sell;
+
+pub use market::{sale_value, Market};
+pub use sell::{SellPlugin, SellRequested};
 
 use std::collections::HashMap;
 
@@ -31,9 +38,9 @@ impl Default for Wallet {
 /// One harvested batch, quality-graded at harvest time (design doc §3.3)
 /// and never re-graded afterward. Lots are kept separate per harvest
 /// rather than merged into one running total per crop, even for the
-/// same crop id - a later Phase 5 sell flow will likely want to
-/// price/sell by quality grade, which is easier against distinct lots
-/// than a merged pile that's lost which portion was which grade.
+/// same crop id - Phase 5's sell flow (`sell.rs`) prices per lot before
+/// summing, which is easier against distinct lots than a merged pile
+/// that's lost which portion was which grade.
 #[derive(Debug, Clone, Copy)]
 pub struct HarvestedLot {
     pub quantity: u32,
@@ -65,6 +72,8 @@ pub struct EconomyPlugin;
 
 impl Plugin for EconomyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Wallet>().init_resource::<Inventory>();
+        app.init_resource::<Wallet>()
+            .init_resource::<Inventory>()
+            .add_plugins(SellPlugin);
     }
 }

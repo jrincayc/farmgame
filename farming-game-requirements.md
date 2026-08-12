@@ -111,6 +111,7 @@ This is more setup than a flat season enum, but it's what actually earns "data-d
 
 ### 4.5 Economy
 - Selling harvested goods: for MVP, price is **static per crop but formula-shaped**: `sale_value = sell_price * quality_multiplier * time_factor`. `quality_multiplier` comes from the harvest's quality grade (§4.3); `time_factor` is fixed at `1.0` for MVP but exists as a real term in the formula so variable/seasonal pricing later (stretch) is a matter of changing what feeds that term, not restructuring the sale calculation.
+- **Resolved (Phase 5):** selling is **instant**, not routed through the action queue/equipment capacity (§4.6a). Equipment capacity models fieldwork on tiles; selling harvested goods already sitting in inventory has no tile to target and isn't fieldwork. Harvesting itself is already capacity-limited, so the queue's throughput constraint already applies upstream of the sale. MVP sells all held lots of a crop at once (not per-lot/per-quality-grade selection).
 - Buying seeds, tools/equipment, and structures (e.g., greenhouses) — a single purchase flow: cost deducted from `Wallet`, item added to player's owned equipment or built onto a chosen tile
 - Basic money/inventory tracking
 
@@ -187,6 +188,8 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 - **Resolved:** queued actions (§4.6a) should be reorderable/cancelable in principle — `PendingAction`s carry a stable ID from the start (see design doc §2.7) so the underlying data supports this. The UI for reordering/canceling is deferred; MVP UI can ship FIFO-only display while the data model is already ready for it.
 - **Resolved:** farm grid size is a player-chosen parameter at world creation, within a min/max bound (§4.2), rather than a fixed constant. MVP still ships with a default size; the picker UI itself may be deferred if it doesn't fit MVP timeline, but the underlying `FarmConfig`-style resource is sized-aware from the start.
 - Timer mode speed options: how many speed tiers, and what's the real-time-minutes-per-game-day at each?
+- **Resolved (Phase 5):** whether selling goes through the action queue or is instant (raised at the end of Phase 4) — see §4.5. It's instant.
+- **New (Phase 5, open):** selling is currently all-lots-at-once per crop id. Per-lot/per-quality-grade selling (sell only the Premium stock, hold the Poor stock) is a plausible stretch if playtesting shows players want that control — not built now, but `sell.rs`'s per-lot valuation loop is structured so filtering which lots get drained is additive.
 
 ---
 
