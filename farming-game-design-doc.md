@@ -156,6 +156,12 @@ pub struct SoilState {
     pub fertility: f32,     // 0.0–1.0
     pub moisture: f32,      // 0.0–1.0
     pub soil_type: SoilType,
+    // Added Phase 4: set true by ActionKind::Till, consumed (cleared)
+    // by a successful ActionKind::Plant. A field needs re-tilling
+    // between crops, not just once ever - gives Till a recurring
+    // throughput role (requirements §4.6a) rather than a one-time
+    // formality.
+    pub tilled: bool,
 }
 
 pub enum SoilType { Sandy, Loamy, Clay }
@@ -174,7 +180,9 @@ Querying "all tiles with soil but no crop" or "all planted, matured crops" becom
 
 `SoilState.fertility` was previously undefined behavior — the day-advance diagram (§1.1) named `farm::degrade_soil` but no formula existed, and the prototype spike left fertility static. This fills that gap. **Implemented in Phase 3** (fallow-tile half only — see below).
 
-**While a tile has a `PlantedCrop`:** each `DayAdvanced`, that tile's `SoilState.fertility` changes by `def.fertility_impact_per_day` (§2.4). Positive values (most crops) drain the soil; negative values (legumes, cover crops) replenish it. This is the same "declare tolerance/impact as data, let outcomes emerge from comparison" approach already used for climate suitability (§4.3a of the requirements doc) — crop rotation isn't a system to build, it's a consequence of players sequencing crops with complementary `fertility_impact_per_day` values. **Not yet implemented** — needs `PlantedCrop`/`CropDef`, which land in Phase 4. Until then, every tile is treated as fallow, which is accurate since nothing can be planted yet.
+**While a tile has a `PlantedCrop`:** each `DayAdvanced`, that tile's `SoilState.fertility` changes by `def.fertility_impact_per_day` (§2.4). Positive values (most crops) drain the soil; negative values (legumes, cover crops) replenish it. This is the same "declare tolerance/impact as data, let outcomes emerge from comparison" approach already used for climate suitability (§4.3a of the requirements doc) — crop rotation isn't a system to build, it's a consequence of players sequencing crops with complementary `fertility_impact_per_day` values. **Implemented in Phase 4.**
+
+**Phase 4 sign-convention correction:** the pseudocode below originally added `def.fertility_impact_per_day` to `soil.fertility` directly, with no negation. That contradicts this section's own stated convention — a positive ("draining") value would *increase* fertility, and the starter roster's one legume (a negative value, meant to demonstrate nitrogen-fixing replenishment) would have *decreased* it. Backwards on both counts, and it would have quietly undermined the "crop rotation is emergent" pitch this section leads with. The corrected formula negates the field: `delta = -def.fertility_impact_per_day`. A regression-style note lives alongside the fix in `farm::degrade_soil`.
 
 **While a tile is fallow (no `PlantedCrop`):** fertility drifts back toward a baseline (e.g. 0.6) at a rate depending on `SoilType` (§2.3) — e.g. Loamy regenerates fastest, Sandy slowest. This is the first real use of `SoilType` beyond being an inert label.
 
@@ -186,7 +194,11 @@ fn degrade_soil(
     for (mut soil, planted) in &mut tiles {
         let delta = match planted {
             Some(crop) => crop_defs.get(&crop.def)
-                .map(|def| def.fertility_impact_per_day)
+                // Negated: fertility_impact_per_day is documented as
+                // "positive drains, negative replenishes" - so a
+                // positive value must SUBTRACT from fertility, not add.
+                // See the Phase 4 correction note above.
+                .map(|def| -def.fertility_impact_per_day)
                 .unwrap_or(0.0),
             None => {
                 // Drift toward FALLOW_FERTILITY_BASELINE (e.g. 0.6),
@@ -223,7 +235,14 @@ pub struct CropDef {
     pub max_temp: f32,
     pub ideal_temp_range: (f32, f32),
     pub frost_tolerant: bool,
-    pub water_requirement: f32,
+    // Phase 4 schema change: water_requirement (a single scalar) only
+    // modeled under-watering. Real crops can also suffer from too much
+    // water (root rot, waterlogging) - so moisture now mirrors the
+    // temperature fields exactly: an absolute viable range plus a
+    // narrower ideal range, both on SoilState.moisture's 0.0-1.0 scale.
+    pub min_moisture: f32,
+    pub max_moisture: f32,
+    pub ideal_moisture_range: (f32, f32),
     pub fertility_requirement: f32,
     pub base_yield: u32,
     pub sell_price: u32,
@@ -279,7 +298,9 @@ Example `assets/crops/tomato.json`:
     "max_temp": 35.0,
     "ideal_temp_range": [18.0, 28.0],
     "frost_tolerant": false,
-    "water_requirement": 0.6,
+    "min_moisture": 0.2,
+    "max_moisture": 0.9,
+    "ideal_moisture_range": [0.4, 0.7],
     "fertility_requirement": 0.4,
     "base_yield": 12,
     "sell_price": 8,
@@ -298,6 +319,8 @@ Example `assets/crops/tomato.json`:
 (Tomato as a short-window, steep-decay crop; a wheat-style crop would use a longer window and gentler per-day stress.)
 
 ### 2.5 Economy (Resource)
+
+**Phase 4 note:** `Wallet` is implemented now, as a stub — Phase 4's `Plant` action needs somewhere to deduct `seed_cost` from, and `Harvest` needs an `Inventory` (§2.4's harvested-goods store, not shown separately here since it's a straightforward `HashMap<String, Vec<HarvestedLot>>` keyed by crop id) to add quality-tagged yield to. `Market` and `sale_value()` below are still Phase 5 — there's no selling flow yet, just the wallet/inventory bookkeeping the queue needs to run.
 
 ```rust
 #[derive(Resource)]
@@ -328,7 +351,7 @@ pub struct Equipment {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ActionKind { Till, Plant, Water, Fertilize, Harvest }
+pub enum ActionKind { Till, Plant, Water, Fertilize, Harvest, Clear }
 
 // Stretch: purchasable structures (e.g. greenhouses) placed on tiles
 #[derive(Component)]
@@ -337,6 +360,8 @@ pub struct Structure {
     pub tiles_covered: Vec<IVec2>,
 }
 ```
+
+**Phase 4 addition — `Clear`:** §2.4's dead-crop state ("stays until explicitly cleared by the player") needed an `ActionKind` to resolve through. Given its own capacity bucket rather than folding into `Till`, since clearing debris and tilling a field are different equipment in practice.
 
 For MVP, `Equipment::daily_capacity` is a fixed set of starting values, not modified by purchases — purchasable upgrades (raising these numbers) and purchasable `Structure`s (like greenhouses, which also spawn a `TileClimateModifier` per covered tile) are both stretch goals sharing one purchase flow: deduct `seed_cost`-equivalent from `Wallet`, then either bump a capacity value or spawn a `Structure` + tile modifiers.
 
@@ -411,10 +436,12 @@ This indirection is deliberate: it means save-file format is decoupled from inte
 
 ```
 Player selects tile + crop, presses "queue plant" →
-    - client-side check: tile has SoilState, no existing PlantedCrop, player has seed_cost in Wallet
+    - client-side check: tile has SoilState, is tilled, no existing PlantedCrop, player has seed_cost in Wallet
       (a soft check for player feedback — the real check happens at resolution time, §3.1a)
     - push PendingAction { tile, kind: Plant, crop_to_plant: Some(handle) } onto ActionQueue.pending
 ```
+
+**Phase 4 addition — planting requires a tilled tile:** resolution now also checks `soil.tilled`, set by a prior `ActionKind::Till` and consumed (cleared to `false`) by a successful Plant. A field needs re-tilling between crops, not just once ever — this is what gives `Till` a real, recurring throughput role (requirements §4.6a) rather than being a one-time formality with no ongoing equipment demand.
 
 Money is **not** deducted at queue time — only at resolution, so a player can queue more plantings than their current wallet supports and it'll simply fail/skip at resolution if funds run out by then (rather than pre-committing funds to actions that might get reordered or canceled while still paused, per the open question in the requirements doc).
 
@@ -450,12 +477,19 @@ This system owns the "equipment capacity throttles the day" rule from §4.6a of 
 
 ### 3.2 Growth tick (on `DayAdvanced`, after action queue processing)
 
+**Phase 4 correction — frost was dead data:** this section's original pseudocode computed `temp_stress` from `Region::temp_on` alone and never referenced `WeatherToday.is_frost`, despite `frost_tolerant` existing specifically to interact with frost. A frost event is a sharp, discrete overnight cold snap layered on top of the smooth seasonal curve (§3.4) — a day can sit comfortably within a crop's viable temperature range on the curve and still frost that night. Without checking `is_frost`, `frost_tolerant` had no effect on anything. The pseudocode below adds a flat stress hit on a frost day for non-frost-tolerant crops.
+
+**Phase 4 addition — moisture stress mirrors temperature stress:** per the schema change in §2.4, moisture now has its own min/max/ideal range, checked the same way temperature is. A scale factor (`MOISTURE_STRESS_SCALE`) converts the 0.0–1.0 moisture range into stress units comparable to temperature's degree-Celsius range — without it, moisture deviations would always be negligible next to temperature ones.
+
+**Phase 4 addition — fertility gate:** soil below `fertility_requirement` now adds a mild, "outside ideal but viable" stress, the same treatment as being outside a crop's ideal (but still viable) temperature or moisture range.
+
 ```rust
 fn tick_growth(
     mut crops: Query<(Entity, &mut PlantedCrop, &Tile)>,
     soils: Query<&SoilState>,
     region: Res<Region>,
     calendar: Res<Calendar>,
+    weather: Res<WeatherToday>,
     crop_defs: Res<Assets<CropDef>>,
 ) {
     for (entity, mut crop, tile) in &mut crops {
@@ -464,6 +498,7 @@ fn tick_growth(
         }
 
         let def = crop_defs.get(&crop.def).unwrap();
+        let soil = soils.get(entity).unwrap(); // PlantedCrop and SoilState live on the same tile entity
         let temp = region.temp_on(calendar.current_day, calendar.year_length);
         // effective_temp would include TileClimateModifier here, once greenhouses exist
 
@@ -476,10 +511,34 @@ fn tick_growth(
             0.0
         };
 
+        // Frost: a discrete event, not read from the smooth temp curve
+        // at all - see correction note above.
+        let frost_stress = if weather.is_frost && !def.frost_tolerant {
+            FROST_STRESS // flat placeholder, e.g. 6.0
+        } else {
+            0.0
+        };
+
+        // Moisture: same shape as temp_stress, scaled onto comparable units.
+        let moisture_stress = if soil.moisture < def.min_moisture || soil.moisture > def.max_moisture {
+            (def.min_moisture - soil.moisture).max(soil.moisture - def.max_moisture) * MOISTURE_STRESS_SCALE
+        } else if !(def.ideal_moisture_range.0..=def.ideal_moisture_range.1).contains(&soil.moisture) {
+            0.25
+        } else {
+            0.0
+        };
+
+        let fertility_stress = if soil.fertility < def.fertility_requirement {
+            0.25 // mild, same treatment as outside-ideal temp/moisture
+        } else {
+            0.0
+        };
+
         // Overripening: only applies once a crop has completed its final
         // stage and sat there past optimal_harvest_window_days. Feeds the
-        // exact same accumulators as temperature stress - "left to rot" is
-        // not a separate mechanic, it's another source of daily stress.
+        // exact same accumulators as every other stress source - "left to
+        // rot" is not a separate mechanic, it's another source of daily
+        // stress.
         let is_at_final_stage = !def.growth_stages.is_empty()
             && crop.current_stage == def.growth_stages.len() - 1
             && crop.days_in_stage >= def.growth_stages[crop.current_stage].duration_days;
@@ -490,7 +549,8 @@ fn tick_growth(
         } else {
             0
         };
-        let today_stress = temp_stress + overripe_days as f32 * def.overripe_stress_per_day;
+        let today_stress = temp_stress + frost_stress + moisture_stress + fertility_stress
+            + overripe_days as f32 * def.overripe_stress_per_day;
 
         crop.cumulative_stress += today_stress;                                  // feeds YIELD
         crop.worst_single_day_stress = crop.worst_single_day_stress.max(today_stress); // feeds QUALITY
@@ -532,10 +592,25 @@ the final stage has actually completed, not merely been entered), presses
 At resolution time (§3.1a), for each harvest action that fits within capacity:
     yield_amount = def.base_yield * yield_factor(crop.cumulative_stress, soil.fertility, soil.moisture)
     quality = quality_grade(crop.worst_single_day_stress, def.quality_thresholds)
-    sale_value_per_unit = sale_value(def.id, def.sell_price, quality, &market)   // §2.5
     → add `yield_amount` units of crop.id (tagged with `quality`) to player Inventory
     → despawn PlantedCrop component from tile (soil remains)
 ```
+
+**Phase 4 note — no sale at harvest:** an earlier draft of this pseudocode computed `sale_value_per_unit` at harvest time using `Market` (§2.5). That's a Phase 5 concern — Phase 4 only stocks `Inventory` with quality-tagged lots; converting them to money is a separate, later action once `Market`/`sale_value()` exist. Keeping harvest and selling as two distinct steps also matches how the requirements doc's own MVP loop reads: "plant → grow → harvest → sell," not "plant → grow → harvest-and-sell."
+
+**Phase 4 addition — `yield_factor(...)` was previously named but never defined.** Implemented as two independent [0,1]-clamped factors multiplied together:
+
+```rust
+fn yield_factor(cumulative_stress: f32, fertility: f32, moisture: f32) -> f32 {
+    let stress_factor = (1.0 - cumulative_stress / YIELD_STRESS_DIVISOR).clamp(0.0, 1.0);
+    let soil_factor = ((fertility + moisture) / 2.0).clamp(MIN_SOIL_YIELD_FACTOR, 1.0);
+    stress_factor * soil_factor
+}
+```
+
+`stress_factor` tapers to zero as `cumulative_stress` approaches `YIELD_STRESS_DIVISOR` (a §5-style placeholder). `soil_factor` reflects the tile's fertility/moisture *at harvest time*, but is floored at `MIN_SOIL_YIELD_FACTOR` (also a placeholder, e.g. 0.3) rather than being able to zero out yield on its own — a crop that otherwise grew well on mediocre-but-viable soil shouldn't harvest nothing just because the tile wasn't pristine. `yield_amount` is `(def.base_yield as f32 * yield_factor(...)).round() as u32`.
+
+**Dead crops use `Clear`, not `Harvest`:** a `PlantedCrop` with `dead: true` can't be queued for `Harvest` (resolution rejects it, per §3.1a) — it goes through `ActionKind::Clear` instead, which removes the `PlantedCrop` component with no yield, matching §2.4's "stays until explicitly cleared" behavior.
 
 Harvesting late (after `optimal_harvest_window_days` has elapsed since maturity) isn't blocked — it's already reflected in `worst_single_day_stress` and `cumulative_stress` by the time the player harvests, per §3.2. A tomato left two extra days will simply grade lower (or die) by the time it's picked; there's no separate "too late to harvest" rule to implement.
 
@@ -560,9 +635,9 @@ pub struct WeatherToday {
 ## 4. What's Deliberately Deferred (per stretch goals)
 
 - **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.
-- **Equipment upgrades:** `Equipment::daily_capacity` (§2.6) is written as a `HashMap` specifically so a purchase can just increase a value in it — no structural change needed when upgrades are added.
+- **Equipment upgrades:** `Equipment::daily_capacity` (§2.6) is written as a `HashMap` specifically so a purchase can just increase a value in it — no structural change needed when upgrades are added. **Implemented (fixed, non-purchasable) in Phase 4.**
 - **Greenhouses (§4.3a):** `TileClimateModifier` is defined in §2.3, and `Structure` (§2.6) is shaped to spawn one per covered tile, but neither is wired into a purchase flow or the growth-tick lookup yet. Growth tick already has the comment marking where it plugs in.
-- **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built.
+- **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5) — `Market`/`sale_value()`/selling remain Phase 5.
 - **Multi-region:** `Region` as a singleton `Resource` is an MVP simplification; the `temp_on()` function itself doesn't assume singleton-ness, so multi-region later means changing *how Region is looked up* (per-farm entity vs. global resource), not the climate math.
 
 ---
@@ -573,6 +648,8 @@ pub struct WeatherToday {
 - Tile grid size for MVP: now targeting thousands of tiles rather than hundreds (§5 non-functional target, driven by modern-equipment scale — §2.6), specifically so equipment capacity is a real constraint. A `HashMap<IVec2, Entity>` lookup is still fine at that scale in Bevy — this isn't a "need spatial partitioning" threshold, just worth confirming during prototyping that per-tile queries (e.g. `tick_growth` iterating every `PlantedCrop`) stay comfortably within the frame budget at a few thousand entities, since that wasn't validated at the smaller original target.
 - Exact multiplier values for quality grades (0.5x/1.0x/1.5x) and the stress thresholds themselves are placeholders — real values only make sense after playtesting a few crops.
 - Same for `Equipment::daily_capacity` starting values and `TimerSpeed` real-time durations — both playtesting questions, not architecture ones (mirrors the open questions in the requirements doc).
+- **New (Phase 4):** `YIELD_STRESS_DIVISOR`, `MIN_SOIL_YIELD_FACTOR`, `MOISTURE_STRESS_SCALE`, `FROST_STRESS`, `FERTILITY_DEFICIT_STRESS`/moisture's equivalent, and the `Water`/`Fertilize` per-action bump amounts are all §5-style placeholders introduced this phase — same "playtesting question, not architecture question" category as everything else in this list, just not yet tuned against real crop runs.
+- **New (Phase 4) — Bevy's exact `AssetLoader` trait signature:** `CropDefLoader` (crops/crop_def.rs) is written from memory against the pattern Bevy's own `custom_asset` example uses, but wasn't compiled before packaging (per your request to skip `cargo check` on this batch). If it doesn't compile as-is, the doc comment on `CropDefLoader` in that file lists the two most likely fixes (BoxedFuture vs. native `async fn`, and the `read_to_end` import). Worth checking this file first if `cargo check` fails anywhere in `crops/`.
 - **Resolved:** `ActionQueue` player reordering/cancellation (requirements doc §9) — `PendingAction` carries a stable `id` from the start (§2.7), so the data model supports this even though the MVP UI itself is FIFO-display-only.
 - **Resolved:** grid size (requirements doc §4.2, §9) — `FarmConfig { width, height }` (§2.3) is a resource, not a compiled-in constant, bounded by `FarmConfig::MIN_DIMENSION`/`MAX_DIMENSION`, with an MVP default of 64×64. A player-facing size picker is stretch UI on top of the same resource.
 - **Resolved:** Bevy version — pinned to `=0.16.0` exactly, with `bevy_egui = "=0.34.1"` as the matching UI integration version.

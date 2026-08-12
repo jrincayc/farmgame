@@ -20,12 +20,15 @@ pub enum DayAdvanceOrder {
     Climate,
     /// farm::degrade_soil (Phase 3)
     Farm,
-    // /// crops::process_action_queue (Phase 4)
-    // CropsQueue,
-    // /// crops::tick_growth (Phase 4)
-    // CropsGrowth,
-    // /// crops::check_failure (Phase 4)
-    // CropsFailure,
+    /// crops::process_action_queue (Phase 4)
+    CropsQueue,
+    /// crops::tick_growth (Phase 4) — includes death/failure checking
+    /// inline (design doc §3.2's lethal_stress check) rather than as a
+    /// separate `CropsFailure` set; there wasn't a clean reason to split
+    /// "advance growth" from "check whether that growth just killed the
+    /// crop" into two passes when the latter falls straight out of the
+    /// former's own stress calculation.
+    CropsGrowth,
     // /// economy::update_prices (Phase 5)
     // Economy,
 }
@@ -42,6 +45,8 @@ pub fn configure(app: &mut App) {
             TimeSystems::Trigger,
             DayAdvanceOrder::Climate,
             DayAdvanceOrder::Farm,
+            DayAdvanceOrder::CropsQueue,
+            DayAdvanceOrder::CropsGrowth,
             TimeSystems::Apply,
         )
             .chain(),

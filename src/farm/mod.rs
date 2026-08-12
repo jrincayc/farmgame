@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::climate::WeatherToday;
+use crate::crops::{CropDef, PlantedCrop};
 use crate::sim_order::DayAdvanceOrder;
 use crate::time::DayAdvanced;
 
@@ -56,6 +57,14 @@ pub struct SoilState {
     /// 0.0-1.0.
     pub moisture: f32,
     pub soil_type: SoilType,
+    /// **Added Phase 4.** Whether the tile has been freshly tilled and
+    /// is ready to plant. Set by `ActionKind::Till`; consumed (cleared)
+    /// by a successful `ActionKind::Plant` — a field needs re-tilling
+    /// between crops, not just once ever, which gives Till a real,
+    /// recurring throughput role (requirements §4.6a) rather than a
+    /// one-time formality. Not part of the original Phase 3 design; the
+    /// design doc's §2.3 `SoilState` struct is updated to match.
+    pub tilled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -137,6 +146,7 @@ fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: Re
                         fertility: FALLOW_FERTILITY_BASELINE,
                         moisture: 0.4,
                         soil_type: starting_soil_type(coord),
+                        tilled: false,
                     },
                 ))
                 .id();
@@ -171,21 +181,29 @@ fn starting_soil_type(coord: IVec2) -> SoilType {
 /// fallow-tile fertility toward `FALLOW_FERTILITY_BASELINE` and applies
 /// the day's rainfall/evaporation to moisture.
 ///
-/// **Design doc correction:** §2.3a's prose says fallow fertility
-/// "drifts back toward a baseline," but its code sample applied a flat
-/// `soil.fertility + regen_rate` delta every day — which doesn't drift
-/// toward anything, it just climbs until clamped at 1.0. This
-/// implements the prose's actual intent: `delta = (baseline -
-/// fertility) * rate`, so fertility approaches `FALLOW_FERTILITY_
-/// BASELINE` and levels off there rather than eventually maxing out.
+/// **Phase 4: the planted-tile fertility branch is now implemented,**
+/// closing the gap Phase 3 explicitly left open (its scope note said
+/// every tile was treated as fallow since `PlantedCrop`/`CropDef`
+/// didn't exist yet). While a tile has a `PlantedCrop`, fertility now
+/// changes by that crop's `fertility_impact_per_day` instead of
+/// drifting toward the fallow baseline.
 ///
-/// **Phase 3 scope note:** this only implements the fallow-tile half
-/// of §2.3a's `degrade_soil` — the "while a tile has a `PlantedCrop`,
-/// fertility drains/replenishes by `fertility_impact_per_day`" half
-/// needs `PlantedCrop`/`CropDef`, which don't exist until Phase 4. This
-/// system gains that match arm then; until then every tile is
-/// effectively treated as fallow, which is accurate since nothing can
-/// be planted yet.
+/// **Sign-convention bug caught while wiring this up:** the design
+/// doc's own field comment on `fertility_impact_per_day` says "positive
+/// drains soil, negative (legumes etc.) replenishes it" — but §2.3a's
+/// `degrade_soil` pseudocode *added* `fertility_impact_per_day`
+/// directly to `soil.fertility` with no negation. Adding a positive
+/// number increases fertility, which is the opposite of "draining."
+/// Following that pseudocode literally would have made every heavy
+/// feeder (tomato, wheat, carrot — all positive values) replenish the
+/// soil, and the one legume in the starter roster (negative value,
+/// meant to demonstrate rotation via nitrogen-fixing) would have
+/// drained it — backwards on both counts, and it would have quietly
+/// undermined the entire "crop rotation is emergent from these values"
+/// pitch (requirements §4.2). Fixed here by negating: `delta =
+/// -fertility_impact_per_day`. The design doc's pseudocode is corrected
+/// to match, with a note in place, same pattern as the earlier
+/// flat-delta fallow-drift bug.
 ///
 /// If more than one `DayAdvanced` fires in the same frame (the timer's
 /// stutter-catchup case — see time module), this applies once per
@@ -196,17 +214,26 @@ fn starting_soil_type(coord: IVec2) -> SoilType {
 fn degrade_soil(
     mut events: EventReader<DayAdvanced>,
     weather: Res<WeatherToday>,
-    mut tiles: Query<&mut SoilState>,
+    crop_defs: Res<Assets<CropDef>>,
+    mut tiles: Query<(&mut SoilState, Option<&PlantedCrop>)>,
 ) {
     let day_count = events.read().count();
     if day_count == 0 {
         return;
     }
 
-    for mut soil in &mut tiles {
+    for (mut soil, planted) in &mut tiles {
         for _ in 0..day_count {
-            let regen_rate = soil.soil_type.fallow_regen_rate();
-            let fertility_delta = (FALLOW_FERTILITY_BASELINE - soil.fertility) * regen_rate;
+            let fertility_delta = match planted {
+                Some(crop) => crop_defs
+                    .get(&crop.def)
+                    .map(|def| -def.fertility_impact_per_day)
+                    .unwrap_or(0.0),
+                None => {
+                    let regen_rate = soil.soil_type.fallow_regen_rate();
+                    (FALLOW_FERTILITY_BASELINE - soil.fertility) * regen_rate
+                }
+            };
             soil.fertility = (soil.fertility + fertility_delta).clamp(0.0, 1.0);
 
             let moisture_delta = weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION;
@@ -219,6 +246,7 @@ fn degrade_soil(
 mod tests {
     use super::*;
     use crate::climate::ClimatePlugin;
+    use crate::crops::CropsPlugin;
     use crate::time::{StepDayRequested, TimePlugin};
     use std::collections::HashSet;
 
@@ -227,6 +255,14 @@ mod tests {
         app.add_plugins(MinimalPlugins);
         app.add_plugins(TimePlugin);
         app.add_plugins(ClimatePlugin);
+        // CropsPlugin registers the CropDef asset type/loader that
+        // degrade_soil's Res<Assets<CropDef>> param needs to exist as a
+        // resource, even though these farm-module tests never actually
+        // load a crop (every tile stays fallow, same as Phase 3's
+        // tests) - AssetPlugin (from DefaultPlugins, not present under
+        // MinimalPlugins) would normally register Assets<T> machinery,
+        // so CropsPlugin's init_asset::<CropDef>() covers that gap here.
+        app.add_plugins(CropsPlugin);
         app.add_plugins(FarmPlugin);
         crate::sim_order::configure(&mut app);
         // Overwrites the FarmConfig that FarmPlugin::build already
@@ -266,6 +302,17 @@ mod tests {
             tile_map.tiles.len() as u32,
             FarmConfig::MIN_DIMENSION * FarmConfig::MAX_DIMENSION
         );
+    }
+
+    #[test]
+    fn spawned_tiles_start_untilled() {
+        let mut app = test_app(FarmConfig {
+            width: 1,
+            height: 1,
+        });
+        app.update();
+
+        assert!(all_soil(&mut app).iter().all(|s| !s.tilled));
     }
 
     #[test]

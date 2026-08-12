@@ -1,0 +1,28 @@
+{
+    "id": "green_bean",
+    "name": "Green Bean",
+    "growth_stages": [
+        { "name": "sprout", "duration_days": 4 },
+        { "name": "growing", "duration_days": 8 },
+        { "name": "mature", "duration_days": 3 }
+    ],
+    "min_temp": 8.0,
+    "max_temp": 32.0,
+    "ideal_temp_range": [18.0, 27.0],
+    "frost_tolerant": false,
+    "min_moisture": 0.25,
+    "max_moisture": 0.85,
+    "ideal_moisture_range": [0.4, 0.65],
+    "fertility_requirement": 0.2,
+    "base_yield": 10,
+    "sell_price": 6,
+    "seed_cost": 6,
+    "quality_thresholds": {
+        "premium_max_stress": 0.5,
+        "good_max_stress": 2.2,
+        "lethal_stress": 8.5
+    },
+    "optimal_harvest_window_days": 4,
+    "overripe_stress_per_day": 1.0,
+    "fertility_impact_per_day": -0.02
+}

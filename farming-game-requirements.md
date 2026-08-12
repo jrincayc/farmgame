@@ -74,7 +74,9 @@ Suggested crop data schema (fields to define per crop):
 | `min_temp` / `max_temp` | Temperature range the crop can grow in at all |
 | `ideal_temp_range` | Narrower range for full/ideal yield (yield tapers outside this, fails outside min/max) |
 | `frost_tolerant` | Whether the crop survives a frost event |
-| `water_requirement` | How much/how often moisture is needed |
+| `water_requirement` | **Superseded (Phase 4):** see `min_moisture`/`max_moisture`/`ideal_moisture_range` below. A single scalar only modeled under-watering; over-watering (waterlogging, root rot) is a real failure mode too, so moisture is now specified the same way temperature is — an absolute viable range plus a narrower ideal range. |
+| `min_moisture` / `max_moisture` | Absolute moisture range (on `SoilState.moisture`'s 0.0–1.0 scale) the crop survives at all |
+| `ideal_moisture_range` | Narrower range for full/ideal yield and quality; tapers/penalizes outside it the same way `ideal_temp_range` does |
 | `fertility_requirement` | Minimum soil fertility to grow well |
 | `base_yield` | Amount produced at harvest under ideal conditions |
 | `yield_modifiers` | How cumulative (average, ongoing) conditions scale total yield quantity |
@@ -153,7 +155,7 @@ Distinct from the action queue in §4.6a: the queue handles "do these specific a
 
 To keep this achievable as a first game project:
 - 1 farm plot area, grid-based — sized in the thousands of tiles (see §5), not hundreds, so modern equipment (§4.6a) doesn't trivially clear it in a day
-- 3–4 crops, in one region climate (just enough to prove the temperature-driven viability system)
+- 3–4 crops, in one region climate (just enough to prove the temperature-driven viability system) — **Resolved (Phase 4):** Tomato, Wheat, Carrot, and Green Bean (the roster's legume — its negative `fertility_impact_per_day` is what demonstrates soil-replenishing crop rotation as an emergent property of the data, per §4.2, rather than a named system)
 - Basic soil moisture + fertility simulation
 - Simple single-season day-counter loop (no day/night)
 - Time control: Paused / Step / Timer (fixed set of speeds)
@@ -181,7 +183,7 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 
 ## 9. Open Questions
 
-- What are reasonable default equipment capacities for MVP (tiles/day for till, water, fertilize, harvest), and what farm-grid size makes that throughput take multiple days rather than one? These two numbers need to be picked together — likely a playtesting question rather than a pure design one.
+- What are reasonable default equipment capacities for MVP (tiles/day for till, water, fertilize, harvest), and what farm-grid size makes that throughput take multiple days rather than one? These two numbers need to be picked together — likely a playtesting question rather than a pure design one. **Phase 4 status:** placeholder starting values are now in code (`Equipment::default()` — Till/Plant 80, Water/Fertilize 150, Harvest 120, Clear 100 per day), matched against the existing 64×64 default farm size. Still unvalidated by actual play.
 - **Resolved:** queued actions (§4.6a) should be reorderable/cancelable in principle — `PendingAction`s carry a stable ID from the start (see design doc §2.7) so the underlying data supports this. The UI for reordering/canceling is deferred; MVP UI can ship FIFO-only display while the data model is already ready for it.
 - **Resolved:** farm grid size is a player-chosen parameter at world creation, within a min/max bound (§4.2), rather than a fixed constant. MVP still ships with a default size; the picker UI itself may be deferred if it doesn't fit MVP timeline, but the underlying `FarmConfig`-style resource is sized-aware from the start.
 - Timer mode speed options: how many speed tiers, and what's the real-time-minutes-per-game-day at each?
