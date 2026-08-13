@@ -1,15 +1,11 @@
 //! Farm sim entry point.
 //!
-//! Phase 5 scope: time (Phase 1) + climate/weather (Phase 2) + farm
-//! tiles/soil (Phase 3) + crops (Phase 4) + economy sell flow (Phase 5:
-//! `Market`/`sale_value`, instant `SellRequested` -> `Wallet` credit).
-//! Still no rendering of the farm itself or real UI (Phase 6) —
-//! temporary keyboard controls let the whole plant→grow→harvest→sell
-//! loop be exercised manually via console output.
-//!
-//! Run with `cargo run`. With no UI yet, `TimeControl` defaults to
-//! Paused, so nothing will happen on its own — press keys per the log
-//! line printed at startup to drive it manually for now.
+//! Phase 6 scope: time (Phase 1) + climate/weather (Phase 2) + farm
+//! tiles/soil (Phase 3) + crops (Phase 4) + economy sell flow (Phase 5)
+//! + a real UI (Phase 6: egui panels, placeholder tile rendering,
+//! click-to-select). Dev keyboard controls are kept alongside the new
+//! UI for now — useful for fast manual testing without clicking through
+//! panels — but the UI is the primary way to play from this phase on.
 
 use bevy::prelude::*;
 
@@ -19,12 +15,14 @@ mod economy;
 mod farm;
 mod sim_order;
 mod time;
+mod ui;
 
 use climate::{ClimatePlugin, Region, WeatherToday};
 use crops::{ActionKind, ActionQueue, CropDef, CropsPlugin, NextActionId, PendingAction, PlantedCrop};
 use economy::{EconomyPlugin, Inventory, SellRequested, Wallet};
 use farm::{FarmPlugin, SoilState, TileMap};
 use time::{Calendar, DayAdvanced, StepDayRequested, TimeControl, TimeMode, TimePlugin, TimerSpeed};
+use ui::UiPlugin;
 
 fn main() {
     let mut app = App::new();
@@ -40,6 +38,7 @@ fn main() {
     .add_plugins(FarmPlugin)
     .add_plugins(CropsPlugin)
     .add_plugins(EconomyPlugin)
+    .add_plugins(UiPlugin)
     .add_systems(Startup, print_dev_controls)
     .add_systems(Update, dev_keyboard_controls)
     .add_systems(Update, dev_crop_controls)
@@ -70,22 +69,16 @@ fn main() {
 }
 
 fn print_dev_controls() {
-    info!("=== Farm Sim dev build (Phase 5: crops + action queue + sell) ===");
-    info!("No UI yet - temporary keyboard controls:");
+    info!("=== Farm Sim dev build (Phase 6: UI) ===");
+    info!("A real UI now exists: top bar (time/theme), left panel");
+    info!("(actions/queue), right panel (tile inspector), bottom bar");
+    info!("(wallet/inventory/sell). Click a tile in the grid to select it.");
+    info!("Dev keyboard controls still work too, all targeting tile (0,0):");
     info!("  Space : request a single day Step");
     info!("  1 / 2 / 3 : switch to Timer mode at Slow / Normal / Fast");
     info!("  P : switch to Paused");
-    info!("Crop action queue (all target tile (0,0)):");
-    info!("  T : queue Till");
-    info!("  G : queue Plant (tomato)");
-    info!("  W : queue Water");
-    info!("  F : queue Fertilize");
-    info!("  H : queue Harvest");
-    info!("  C : queue Clear (dead crop)");
-    info!("Economy (Phase 5, instant - not queued/capacity-limited):");
+    info!("  T/G/W/F/H/C : queue Till/Plant(tomato)/Water/Fertilize/Harvest/Clear");
     info!("  M : sell ALL harvested inventory, for every crop id currently held");
-    info!("A normal test sequence: T, Space, G, Space, then W/F + Space a");
-    info!("few times while growing, then H once mature, then M to sell.");
 }
 
 /// Placeholder input handling until the real UI (Phase 6) exists. Not

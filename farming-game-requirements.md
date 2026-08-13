@@ -38,6 +38,7 @@ Things to keep in mind given "some coding experience, new to games":
 ### 4.0 UI Appearance
 
 - The UI (§4.6, bevy_egui) must support both a Light and a Dark visual theme, toggleable by the player at any time. Neither is a fallback for the other — both are first-class supported appearances (some players strongly prefer one, some the other). Default theme TBD, likely Light.
+- **Resolved (Phase 6):** implemented via `bevy_egui`'s built-in `egui::Visuals::light()`/`dark()`, toggled by a button in the top bar, tracked in a `UiTheme { dark: bool }` resource so a later save/load pass (Phase 7) can read/persist it without restructuring. Default is Light, per the open question above.
 
 ### 4.1 Time & Calendar
 - Discrete day counter — no day/night cycle; a "day" is the atomic unit of time
@@ -190,6 +191,17 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 - Timer mode speed options: how many speed tiers, and what's the real-time-minutes-per-game-day at each?
 - **Resolved (Phase 5):** whether selling goes through the action queue or is instant (raised at the end of Phase 4) — see §4.5. It's instant.
 - **New (Phase 5, open):** selling is currently all-lots-at-once per crop id. Per-lot/per-quality-grade selling (sell only the Premium stock, hold the Poor stock) is a plausible stretch if playtesting shows players want that control — not built now, but `sell.rs`'s per-lot valuation loop is structured so filtering which lots get drained is additive.
+- **Resolved (Phase 6):** the action queue/tile-inspector UI needed *some* way to pick a tile without full farm rendering. Landed on a minimal clickable placeholder grid (flat colored `Sprite` squares + a crop-initial `Text2d` label) rather than coordinate text-entry, since it's more honest to how tile selection will actually feel once real rendering exists. See the new "Rendering / Art Pipeline" phase note below for what's still undecided about the real version.
+- **New (Phase 6, open):** the placeholder grid has no pan/zoom — camera is fixed, framed to the default farm size. A non-default (especially larger) `FarmConfig` will frame worse. Real camera controls were deliberately deferred to the rendering/art-pipeline phase rather than built against throwaway placeholder art.
+
+## 10. Rendering / Art Pipeline (new phase, scope TBD)
+
+Placeholder tile visuals shipped in Phase 6 (flat colored squares, text-letter labels) just to make tile-targeted UI meaningful. Real sprite-based rendering — growth-stage art per crop, layered soil overlays (base texture by soil type, tilled/moisture/fertility as separate layers), and camera pan/zoom — is deliberately scoped as its own later phase rather than folded into Phase 6 or sketched fully here. Decisions already made, to carry forward when this phase is planned in full:
+
+- **Growth-stage art stays data-driven, matching `growth_stages`** — a crop's art is however many stage images its own `CropDef` declares (plus one for `dead`), not a fixed skeleton shared by every crop. This preserves `CropDef`'s "arbitrary stage count" flexibility rather than trading it away for easier batch art production.
+- **Soil visuals are layered, not flat per-combination textures** — a base texture per `SoilType`, a tilled overlay, and moisture/fertility as tints or overlays on top, rather than needing a separate flat image per (soil type × tilled state × moisture bucket) combination.
+- **Overripening has no distinct visual state yet** — it's pure stress accumulation on the `mature`/final stage (§3.2), not a separate stage, so there's nothing to swap art on without adding one. Left open whether that's worth adding later.
+- **Camera pan/zoom** was deferred alongside real sprites, on the reasoning that building camera controls against Phase 6's placeholder squares would be throwaway work.
 
 ---
 

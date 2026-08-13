@@ -18,13 +18,16 @@ Requires the exact-pinned Bevy `0.16.0` and `bevy_egui` `0.34.1` from
 bump + review, since Bevy's API drifts significantly between minor
 versions.
 
-## Current status: Phase 5 (economy — market + sell flow)
+## Current status: Phase 6 (UI — egui panels + placeholder tile rendering)
 
-No rendering of the farm yet, and no real UI (that's Phase 6). `cargo
-run` opens a mostly-empty window; time/climate/farm/crops/economy are
-all wired and drivable via temporary keyboard controls (see console
-output on launch) so the full plant → grow → harvest → sell loop can be
-exercised and verified before the real UI replaces these dev controls.
+`cargo run` now opens a window with a real UI: a top bar (day/season,
+time control, theme toggle), a left panel (action queue), a right panel
+(selected-tile inspector), and a bottom bar (wallet/inventory/sell).
+The farm itself renders as a placeholder grid — flat colored squares
+with a crop-initial text label per tile — clickable to select a tile;
+this is explicitly not the real art pipeline (see the design doc's §10
+note in the requirements doc), just enough for tile-targeted UI to be
+meaningful. Dev keyboard controls from Phases 4–5 still work too.
 
 Implementation proceeds in phases per the agreed plan:
 
@@ -32,10 +35,12 @@ Implementation proceeds in phases per the agreed plan:
 2. **Climate + weather** — done. `Region`/`TempCurve`, `WeatherToday`, two-stage rainfall roll
 3. **Farm tiles + soil** — done. `FarmConfig`, `Tile`/`SoilState`/`SoilType`, `degrade_soil`
 4. **Crops** — done. Data-driven `CropDef` assets, growth tick, action queue, starter roster (Tomato, Wheat, Carrot, Green Bean)
-5. **Economy** *(current)* — `Market`/`sale_value`, instant sell flow (`SellRequested` event, not queued — see design doc §2.5 for why). Wallet/Inventory were already stubbed in Phase 4.
-6. UI (bevy_egui, light/dark toggle)
+5. **Economy** — done. `Market`/`sale_value`, instant sell flow (`SellRequested` event, not queued)
+6. **UI** *(current)* — `bevy_egui` panels (time/theme/queue/inspector/economy), placeholder tile rendering + click-to-select
 7. Save/load
 8. Polish + balancing
+
+*(Rendering/art pipeline — real sprites, growth-stage art, soil overlays, camera pan/zoom — is a newer, not-yet-numbered phase; see requirements doc §10.)*
 
 ## Project layout
 
@@ -53,7 +58,10 @@ src/
 ├── economy/       # Wallet, Inventory, Market, sale_value, instant sell flow
 │   ├── market.rs     # Market resource + sale_value() (design doc §2.5)
 │   └── sell.rs        # SellRequested event + process_sell_requests
-└── ui/            # (Phase 6)
+└── ui/            # egui panels + placeholder tile rendering (Phase 6)
+    ├── mod.rs        # UiPlugin, SelectedTile/UiTheme resources
+    ├── render.rs      # camera, placeholder tile sprites/labels, click-to-select
+    └── panels.rs      # top bar, tile inspector, action queue, economy panels
 assets/
 └── crops/         # crop definition JSON files: tomato, wheat, carrot, green_bean
 build.rs           # copies assets/ into target/<profile>/assets/

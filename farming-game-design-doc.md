@@ -650,6 +650,26 @@ pub struct WeatherToday {
 
 ---
 
+---
+
+## 3.5 UI (Phase 6)
+
+`ui::UiPlugin` wires `bevy_egui` and a placeholder rendering layer, per §1's original note that `ui/` reads from the other modules but doesn't own simulation state — every panel below is read/write access to resources/events other plugins already own (`ActionQueue`, `Wallet`, `Inventory`, `TimeControl`, `SellRequested`), not new simulation logic.
+
+**Placeholder tile rendering (`ui/render.rs`):** a fixed 2D camera framed to the default farm size (no pan/zoom - deferred to a future rendering/art-pipeline phase, see requirements doc §10), one flat-colored `Sprite` per tile (color by `SoilType`, darker overlay when tilled, distinct color when the planted crop is dead) plus a `Text2d` label (crop initial C/G/T/W, `.` for tilled-bare, `X` for dead, blank otherwise). Explicitly not the real art pipeline — just enough to make tile-targeted UI meaningful. Click-to-select (left mouse button, ignored if egui itself wants the pointer that frame) writes a `SelectedTile` resource every other panel reads.
+
+**Panels (`ui/panels.rs`):**
+- Top bar: day/season readout (season is a derived display label per §2.1, not a stored value), time control (Step/Pause/Timer speed buttons), theme toggle.
+- Right side panel: selected-tile inspector — soil type/fertility/moisture/tilled state, and if planted, crop name/stage/days-in-stage/cumulative + worst stress. Dead crops get an explicit red label, not just the tile's red color, per §2.4's "death must be visible" principle.
+- Left side panel: action queue — buttons to queue Till/Water/Fertilize/Harvest/Clear on the selected tile, a crop-picker dropdown + Plant button, and a scrollable FIFO-order display of `ActionQueue.pending` (id + kind). No reorder/cancel controls (requirements §4.6a/§9, deliberately deferred) even though `PendingAction::id` already supports it.
+- Bottom bar: wallet balance, inventory aggregated per crop id, a Sell button per crop id firing `SellRequested` (§2.5's Phase 5 instant-sell flow, unchanged by this phase).
+
+**Theme (`UiTheme` resource):** light/dark toggle via `egui::Visuals::light()`/`dark()`, applied every frame from the resource rather than only on toggle. Default Light (requirements §4.0). Not yet persisted across runs — Phase 7 (save/load) can read this resource directly once it exists.
+
+Dev keyboard controls from Phases 4-5 (`main.rs`) are kept alongside the new UI for fast manual testing, not removed — the UI is the primary way to play from this phase on, but the keyboard path costs nothing to leave in place.
+
+---
+
 ## 4. What's Deliberately Deferred (per stretch goals)
 
 - **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.
@@ -657,6 +677,7 @@ pub struct WeatherToday {
 - **Greenhouses (§4.3a):** `TileClimateModifier` is defined in §2.3, and `Structure` (§2.6) is shaped to spawn one per covered tile, but neither is wired into a purchase flow or the growth-tick lookup yet. Growth tick already has the comment marking where it plugs in.
 - **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5). **Phase 5:** `Market`/`sale_value()`/the sell flow are now implemented (instant, not queued — see §2.5's resolved design question); the futures-market stretch goal remains exactly "write non-1.0 values into `price_modifiers`," unchanged by Phase 5's work.
 - **Multi-region:** `Region` as a singleton `Resource` is an MVP simplification; the `temp_on()` function itself doesn't assume singleton-ness, so multi-region later means changing *how Region is looked up* (per-farm entity vs. global resource), not the climate math.
+- **Real rendering / art pipeline:** Phase 6 shipped only placeholder tile visuals (flat colored squares, text labels) — see requirements doc §10 for the decisions already locked in ahead of that phase (data-driven growth-stage art, layered soil overlays, camera pan/zoom) versus what's still open (overripe-specific art, exact overlay presentation).
 
 ---
 
