@@ -11,6 +11,10 @@
 pub mod market;
 pub mod sell;
 
+// Market/sale_value aren't yet called by name outside economy:: itself
+// (sell.rs uses them internally via `super::`) - kept as public API
+// surface for a future UI/save-load consumer rather than dropped.
+#[allow(unused_imports)]
 pub use market::{sale_value, Market};
 pub use sell::{SellPlugin, SellRequested};
 

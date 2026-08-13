@@ -12,15 +12,13 @@
 //! - `panels`: the egui panels themselves (time control, tile inspector,
 //!   action queue, economy/sell).
 //!
-//! **Highest compile-risk file in this batch:** `bevy_egui` changed its
-//! multi-pass API right around 0.34, and I don't have a compiler in the
-//! loop. I checked the actual `v0.34.1` tag's own examples on GitHub
-//! (not a later version's docs, which use a renamed
-//! `EguiPrimaryContextPass`) to confirm this file uses `EguiContextPass`
-//! and a non-fallible `contexts.ctx_mut()` - but this wasn't run against
-//! the crate itself. If `ui/panels.rs` or this file fails to compile,
-//! start here and in `render.rs`'s `Text2d`/`OrthographicProjection`
-//! usage - both noted inline where the risk is highest.
+//! **Confirmed against the real `v0.34.1` crate (not just guessed, per
+//! the compile error this fixed):** `EguiPlugin` at this version is a
+//! plain struct with an `enable_multipass_for_primary_context: bool`
+//! field and no usable `EguiPlugin::default()` the way later versions
+//! support - it must be constructed explicitly with that field set to
+//! `true` to run UI systems in the `EguiContextPass` schedule, matching
+//! every example in the actual `v0.34.1` tag.
 
 pub mod panels;
 pub mod render;
@@ -54,7 +52,9 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(EguiPlugin { enable_multipass_for_primary_context: true })
+        app.add_plugins(EguiPlugin {
+            enable_multipass_for_primary_context: true,
+        })
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
             .add_systems(Startup, render::setup_camera)
