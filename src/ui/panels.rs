@@ -20,6 +20,7 @@ use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed}
 use super::{SelectedTile, UiTheme};
 use crate::farm::SoilState;
 use crate::crops::PlantedCrop;
+use crate::crops::crop_def;
 
 /// Starter roster (design doc §6/§4.3, Phase 4's four crops), paired
 /// with their asset paths. Same not-data-driven caveat as
@@ -181,6 +182,7 @@ pub fn tile_inspector_panel(
                     ui.label(format!("Days in stage: {}", crop.days_in_stage));
                     ui.label(format!("Cumulative stress: {:.2}", crop.cumulative_stress));
                     ui.label(format!("Worst single-day stress: {:.2}", crop.worst_single_day_stress));
+                    ui.label(format!("Quality: {}", crop_def::quality_grade(crop.worst_single_day_stress, &def.quality_thresholds)));
                 }
                 None => {
                     ui.label("Crop: (asset still loading...)");
