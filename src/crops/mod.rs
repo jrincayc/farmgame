@@ -4,11 +4,18 @@
 //! throughput limits. Extends `farm::degrade_soil`'s planted-tile branch,
 //! which Phase 3 left as a documented gap since `PlantedCrop`/`CropDef`
 //! didn't exist yet.
+//!
+//! **Roster note:** `roster.rs` (new) discovers `assets/crops/*.json` at
+//! startup rather than any code hardcoding the crop list - see its
+//! module doc. This is what lets `ui::panels`' Plant dropdown and
+//! `ui::render`'s tile-letter labels stay correct for any crop roster,
+//! not just the four starter crops.
 
 pub mod crop_def;
 pub mod equipment;
 pub mod growth;
 pub mod queue;
+pub mod roster;
 
 // Some of these re-exports (GrowthStage, QualityThresholds,
 // quality_grade, yield_amount) aren't yet called by name outside
@@ -23,6 +30,7 @@ pub use crop_def::{quality_grade, yield_amount, CropDef, CropDefLoader, GrowthSt
 pub use equipment::Equipment;
 pub use growth::PlantedCrop;
 pub use queue::{ActionKind, ActionQueue, NextActionId, PendingAction};
+pub use roster::{CropRoster, CropRosterEntry, CropRosterPlugin};
 
 use bevy::prelude::*;
 
@@ -34,6 +42,7 @@ impl Plugin for CropsPlugin {
             .init_asset_loader::<CropDefLoader>()
             .init_resource::<Equipment>()
             .add_plugins(queue::CropsQueuePlugin)
-            .add_plugins(growth::CropsGrowthPlugin);
+            .add_plugins(growth::CropsGrowthPlugin)
+            .add_plugins(CropRosterPlugin);
     }
 }

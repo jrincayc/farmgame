@@ -176,37 +176,38 @@ fn tile_color(soil: &SoilState, planted: Option<&PlantedCrop>) -> Color {
 /// bare soil, blank otherwise. Intentionally not soil-type letters for
 /// bare/fallow tiles - soil type is already color-coded (`tile_color`
 /// above), so a redundant letter there would be visual noise.
-fn tile_letter(soil: &SoilState, planted: Option<&PlantedCrop>, crop_defs: &Assets<CropDef>) -> &'static str {
+fn tile_letter(soil: &SoilState, planted: Option<&PlantedCrop>, crop_defs: &Assets<CropDef>) -> String {
     if let Some(crop) = planted {
         if crop.dead {
-            return "X";
+            return "X".to_string();
         }
         return match crop_defs.get(&crop.def) {
             Some(def) => crop_initial(&def.id),
-            None => "?", // asset still streaming in
+            None => "?".to_string(), // asset still streaming in
         };
     }
 
     if soil.tilled {
-        "."
+        ".".to_string()
     } else {
-        ""
+        String::new()
     }
 }
 
-/// Maps the starter roster's `CropDef::id` to its display letter. Not
-/// data-driven (unlike everything else about crops) since this is
-/// throwaway placeholder art, not a real asset reference - the future
-/// rendering phase's data-driven sprite lookup replaces this outright
-/// rather than extending it.
-fn crop_initial(crop_id: &str) -> &'static str {
-    match crop_id {
-        "tomato" => "T",
-        "wheat" => "W",
-        "carrot" => "C",
-        "green_bean" => "G",
-        _ => "?",
-    }
+/// Maps a crop's `CropDef.id` to its display letter: first character,
+/// uppercased. Previously a hardcoded match over the four starter
+/// crops' ids - replaced so a new crop JSON (requirements §4.3: "adding
+/// a crop should mean adding a JSON entry, not writing new code") gets
+/// a reasonable label with zero code changes. Not collision-safe if two
+/// crop ids start with the same letter - acceptable for placeholder
+/// art; the real rendering phase replaces letters with actual sprites
+/// entirely, so this isn't worth a more elaborate disambiguation scheme.
+fn crop_initial(crop_id: &str) -> String {
+    crop_id
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// Click-to-select (left mouse button). Skips the click if egui itself

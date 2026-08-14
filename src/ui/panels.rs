@@ -12,7 +12,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::crops::{ActionKind, ActionQueue, CropDef, NextActionId, PendingAction};
+use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, NextActionId, PendingAction};
 use crate::economy::{Inventory, SellRequested, Wallet};
 use crate::farm::TileMap;
 use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed};
@@ -21,19 +21,6 @@ use super::{SelectedTile, UiTheme};
 use crate::farm::SoilState;
 use crate::crops::PlantedCrop;
 use crate::crops::crop_def;
-
-/// Starter roster (design doc §6/§4.3, Phase 4's four crops), paired
-/// with their asset paths. Same not-data-driven caveat as
-/// `render.rs::crop_initial` - this is UI wiring for a fixed MVP roster,
-/// not a stand-in for a real crop-browsing UI (which would read the
-/// roster from `Assets<CropDef>` or a manifest instead of a hardcoded
-/// list like this).
-const STARTER_CROPS: &[(&str, &str)] = &[
-    ("Tomato", "crops/tomato.json"),
-    ("Wheat", "crops/wheat.json"),
-    ("Carrot", "crops/carrot.json"),
-    ("Green Bean", "crops/green_bean.json"),
-];
 
 fn apply_theme(ctx: &egui::Context, theme: &UiTheme) {
     ctx.set_visuals(if theme.dark { egui::Visuals::dark() } else { egui::Visuals::light() });
@@ -182,7 +169,10 @@ pub fn tile_inspector_panel(
                     ui.label(format!("Days in stage: {}", crop.days_in_stage));
                     ui.label(format!("Cumulative stress: {:.2}", crop.cumulative_stress));
                     ui.label(format!("Worst single-day stress: {:.2}", crop.worst_single_day_stress));
-                    ui.label(format!("Quality: {}", crop_def::quality_grade(crop.worst_single_day_stress, &def.quality_thresholds)));
+                    ui.label(format!(
+                        "Quality: {}",
+                        crop_def::quality_grade(crop.worst_single_day_stress, &def.quality_thresholds)
+                    ));
                 }
                 None => {
                     ui.label("Crop: (asset still loading...)");
@@ -213,11 +203,20 @@ fn enqueue(
 /// picker for Plant, and a FIFO-display-only list of
 /// `ActionQueue.pending` (requirements §4.6a/§9 - reorder/cancel
 /// deferred, not built here even though the data supports it).
+///
+/// **Crop picker is roster-driven, not hardcoded** (see
+/// `crops::roster`'s module doc) - the dropdown lists whatever
+/// `CropRoster` discovered under `assets/crops/*.json` at startup, so a
+/// new crop JSON shows up here with no code change. Before a given
+/// entry's `CropDef` has finished loading, its `file_stem` (filename
+/// without extension) is shown instead of `CropDef.name` as a
+/// reasonable fallback label.
 pub fn action_queue_panel(
     mut contexts: EguiContexts,
     selected: Res<SelectedTile>,
     tile_map: Res<TileMap>,
-    asset_server: Res<AssetServer>,
+    roster: Res<CropRoster>,
+    crop_defs: Res<Assets<CropDef>>,
     mut queue: ResMut<ActionQueue>,
     mut next_id: ResMut<NextActionId>,
     mut crop_choice: Local<usize>,
@@ -258,17 +257,31 @@ pub fn action_queue_panel(
             }
 
             ui.separator();
-            egui::ComboBox::from_label("Crop")
-                .selected_text(STARTER_CROPS[*crop_choice].0)
-                .show_ui(ui, |ui| {
-                    for (i, (name, _path)) in STARTER_CROPS.iter().enumerate() {
-                        ui.selectable_value(&mut *crop_choice, i, *name);
+
+            if roster.entries.is_empty() {
+                ui.label("No crops found under assets/crops/ - nothing to plant.");
+            } else {
+                // Keep the remembered selection in range if the roster
+                // ever shrinks (it won't at runtime today, but this is
+                // cheap insurance against an out-of-bounds index).
+                if *crop_choice >= roster.entries.len() {
+                    *crop_choice = 0;
+                }
+
+                let selected_label = crop_display_name(&roster.entries[*crop_choice], &crop_defs);
+                egui::ComboBox::from_label("Crop")
+                    .selected_text(selected_label)
+                    .show_ui(ui, |ui| {
+                        for (i, entry) in roster.entries.iter().enumerate() {
+                            let label = crop_display_name(entry, &crop_defs);
+                            ui.selectable_value(&mut *crop_choice, i, label);
+                        }
+                    });
+                if ui.button("Plant").clicked() {
+                    if let Some(t) = tile {
+                        let handle = roster.entries[*crop_choice].handle.clone();
+                        enqueue(&mut queue, &mut next_id, t, ActionKind::Plant, Some(handle));
                     }
-                });
-            if ui.button("Plant").clicked() {
-                if let Some(t) = tile {
-                    let handle: Handle<CropDef> = asset_server.load(STARTER_CROPS[*crop_choice].1);
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Plant, Some(handle));
                 }
             }
         });
@@ -284,6 +297,16 @@ pub fn action_queue_panel(
             }
         });
     });
+}
+
+/// `CropDef.name` once loaded, falling back to the roster entry's
+/// filename otherwise - the dropdown shouldn't show a blank/placeholder
+/// label just because an asset hasn't finished streaming in yet.
+fn crop_display_name(entry: &crate::crops::CropRosterEntry, crop_defs: &Assets<CropDef>) -> String {
+    crop_defs
+        .get(&entry.handle)
+        .map(|def| def.name.clone())
+        .unwrap_or_else(|| entry.file_stem.clone())
 }
 
 /// Economy panel: wallet balance, aggregated inventory per crop id, and

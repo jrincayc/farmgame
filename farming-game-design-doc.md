@@ -670,6 +670,19 @@ Dev keyboard controls from Phases 4-5 (`main.rs`) are kept alongside the new UI 
 
 ---
 
+---
+
+## 3.6 Crop Roster Discovery (Phase 6b - post-Phase-6 follow-up)
+
+Two bugs found during Phase 6 playtesting, both closed together:
+
+1. **Hardcoded crop lists.** `ui::panels`' Plant dropdown and `ui::render`'s tile-letter lookup both hardcoded the four starter crops by id/path, contradicting requirements §4.3's "adding a crop should mean adding a JSON entry, not writing new code." Fixed by `crops::roster::CropRoster` — a Startup system scans `assets/crops/*.json` directly (via `std::fs::read_dir`, not Bevy's asset virtual filesystem, which dropped folder-loading in 0.14) and loads a `Handle<CropDef>` per file found. Both UI call sites now read this resource instead of a constant.
+2. **`CropDef` assets unloading between harvest and sell.** `process_sell_requests` (§2.5) looks up a `CropDef` by scanning `Assets<CropDef>` for a matching id — but before this fix, the only strong `Handle<CropDef>` in the whole app was the one inside `PlantedCrop`, and both `Harvest` and `Clear` remove that component, dropping the handle. Bevy's asset server unloads an asset once its last strong handle drops, so by the time a harvested lot reached the sell flow, its `CropDef` could already be gone from `Assets<CropDef>` — sell silently failed (lots preserved, per `sell.rs`'s existing "don't destroy inventory" guard, but nothing was creditable). `CropRoster` incidentally fixes this too: it holds one strong handle per discovered crop for the whole app lifetime, independent of what's planted/harvested, so `Assets<CropDef>` never empties out mid-session.
+
+`CropRoster` also runs light post-load validation (`validate_crop_defs`, reacting to `AssetEvent<CropDef>`) — sanity checks like `min_temp <= max_temp`, `ideal_*_range` falling inside the absolute range, and `quality_thresholds` ordering (`premium < good < lethal`), each logged as a `warn!` rather than rejecting the crop outright. This satisfies "warn if a crop JSON is missing/wrong" without making an in-progress, slightly-malformed crop file un-loadable while someone's actively editing it.
+
+---
+
 ## 4. What's Deliberately Deferred (per stretch goals)
 
 - **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.
