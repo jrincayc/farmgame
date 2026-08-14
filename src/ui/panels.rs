@@ -1,7 +1,8 @@
-//! egui panels (Phase 6) - the real UI replacing the dev keyboard
-//! controls from Phases 4-5. Reads/writes the same resources those dev
-//! controls did (`ActionQueue`, `Wallet`, `Inventory`, `TimeControl`),
-//! so this is a UI-only addition, not a simulation-logic change.
+//! egui panels (Phase 6, + camera zoom buttons added in the pan/zoom
+//! batch) - the real UI replacing the dev keyboard controls from
+//! Phases 4-5. Reads/writes the same resources those dev controls did
+//! (`ActionQueue`, `Wallet`, `Inventory`, `TimeControl`), so this is a
+//! UI-only addition, not a simulation-logic change.
 //!
 //! Requirements §4.6a: the action-queue panel is intentionally
 //! FIFO-display-only - no reorder/cancel controls, even though
@@ -14,10 +15,11 @@ use bevy_egui::{egui, EguiContexts};
 
 use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, NextActionId, PendingAction};
 use crate::economy::{Inventory, SellRequested, Wallet};
-use crate::farm::TileMap;
+use crate::farm::{FarmConfig, TileMap};
 use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed};
 
-use super::{SelectedTile, UiTheme};
+use super::render::{farm_world_center, BUTTON_ZOOM_STEP, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
+use super::{CameraState, SelectedTile, UiTheme};
 use crate::farm::SoilState;
 use crate::crops::PlantedCrop;
 use crate::crops::crop_def;
@@ -44,17 +46,17 @@ fn time_mode_label(mode: &TimeMode) -> String {
     }
 }
 
-/// Top bar: day/season readout, time control, theme toggle. Applies the
-/// current `UiTheme` to the egui context every frame (idempotent, cheap)
-/// rather than only on toggle - simplest way to guarantee the visuals
-/// stay correct regardless of what else might touch `egui::Context`
-/// visuals later (e.g. a future settings panel).
+/// Top bar: day/season readout, time control, theme toggle, and (new)
+/// camera zoom controls. Applies the current `UiTheme` to the egui
+/// context every frame (idempotent, cheap) rather than only on toggle.
 pub fn top_bar(
     mut contexts: EguiContexts,
     mut theme: ResMut<UiTheme>,
     calendar: Res<Calendar>,
     mut control: ResMut<TimeControl>,
     mut step_requests: EventWriter<StepDayRequested>,
+    mut camera_state: ResMut<CameraState>,
+    config: Res<FarmConfig>,
 ) {
     let ctx = contexts.ctx_mut();
     apply_theme(ctx, &theme);
@@ -96,6 +98,25 @@ pub fn top_bar(
 
             ui.separator();
             ui.label(time_mode_label(&control.mode));
+
+            ui.separator();
+            // Camera zoom controls (new). Pan is keyboard-arrow /
+            // middle-click-drag / Ctrl+left-drag only - no pan buttons,
+            // per the plan, since those three input methods already
+            // cover it and a fourth (button-based) pan control would
+            // be redundant.
+            if ui.button("Zoom Out").clicked() {
+                camera_state.zoom_factor =
+                    (camera_state.zoom_factor / BUTTON_ZOOM_STEP).clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+            }
+            if ui.button("Zoom In").clicked() {
+                camera_state.zoom_factor =
+                    (camera_state.zoom_factor * BUTTON_ZOOM_STEP).clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+            }
+            if ui.button("Reset View").clicked() {
+                camera_state.zoom_factor = MIN_ZOOM_FACTOR;
+                camera_state.center = farm_world_center(&config);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if theme.dark { "Light theme" } else { "Dark theme" };
@@ -148,8 +169,6 @@ pub fn tile_inspector_panel(
                 ui.label("No crop planted.");
             }
             Some(crop) if crop.dead => {
-                // Design doc §2.4: death must be visible - naming it
-                // explicitly here, not just via the tile's red color.
                 ui.colored_label(egui::Color32::RED, "Crop is DEAD - queue Clear to remove it.");
             }
             Some(crop) => match crop_defs.get(&crop.def) {
@@ -199,18 +218,6 @@ fn enqueue(
     });
 }
 
-/// Action queue panel: queue buttons for the selected tile, a crop
-/// picker for Plant, and a FIFO-display-only list of
-/// `ActionQueue.pending` (requirements §4.6a/§9 - reorder/cancel
-/// deferred, not built here even though the data supports it).
-///
-/// **Crop picker is roster-driven, not hardcoded** (see
-/// `crops::roster`'s module doc) - the dropdown lists whatever
-/// `CropRoster` discovered under `assets/crops/*.json` at startup, so a
-/// new crop JSON shows up here with no code change. Before a given
-/// entry's `CropDef` has finished loading, its `file_stem` (filename
-/// without extension) is shown instead of `CropDef.name` as a
-/// reasonable fallback label.
 pub fn action_queue_panel(
     mut contexts: EguiContexts,
     selected: Res<SelectedTile>,
@@ -261,9 +268,6 @@ pub fn action_queue_panel(
             if roster.entries.is_empty() {
                 ui.label("No crops found under assets/crops/ - nothing to plant.");
             } else {
-                // Keep the remembered selection in range if the roster
-                // ever shrinks (it won't at runtime today, but this is
-                // cheap insurance against an out-of-bounds index).
                 if *crop_choice >= roster.entries.len() {
                     *crop_choice = 0;
                 }
@@ -299,9 +303,6 @@ pub fn action_queue_panel(
     });
 }
 
-/// `CropDef.name` once loaded, falling back to the roster entry's
-/// filename otherwise - the dropdown shouldn't show a blank/placeholder
-/// label just because an asset hasn't finished streaming in yet.
 fn crop_display_name(entry: &crate::crops::CropRosterEntry, crop_defs: &Assets<CropDef>) -> String {
     crop_defs
         .get(&entry.handle)
@@ -309,13 +310,6 @@ fn crop_display_name(entry: &crate::crops::CropRosterEntry, crop_defs: &Assets<C
         .unwrap_or_else(|| entry.file_stem.clone())
 }
 
-/// Economy panel: wallet balance, aggregated inventory per crop id, and
-/// a per-crop Sell button firing `SellRequested` (design doc §2.5/Phase
-/// 5's resolved instant-not-queued design). Aggregates lot quantities
-/// for display only - selling still drains every lot for that crop id
-/// at once, matching Phase 5's existing `process_sell_requests`
-/// behavior; this panel doesn't add per-lot/per-quality selection
-/// (requirements §9, deferred).
 pub fn economy_panel(
     mut contexts: EguiContexts,
     wallet: Res<Wallet>,

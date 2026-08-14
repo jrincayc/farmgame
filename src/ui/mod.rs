@@ -1,30 +1,23 @@
 //! UI (design doc §1's `ui/` module note: "reads from the others but
 //! doesn't own simulation state"; requirements §4.0's light/dark theme
-//! requirement; §4.6a's FIFO-only queue display) - **Phase 6.**
+//! requirement; §4.6a's FIFO-only queue display) - **Phase 6**, plus a
+//! camera pan/zoom addition (see `render.rs`'s module doc for why that
+//! overrides the earlier deferral).
 //!
 //! Two halves, split across submodules:
 //! - `render`: a placeholder top-down tile grid (flat colored squares +
-//!   a text-letter label per tile) and click-to-select. This is
-//!   explicitly *not* the real art pipeline - per the design discussion
-//!   that preceded this phase, real sprite-based rendering (growth-stage
-//!   art, layered soil overlays) is its own later phase. This phase only
-//!   needed *something* clickable so tile-targeted UI wasn't meaningless.
+//!   a text-letter label per tile), click-to-select, and camera
+//!   pan/zoom. Still explicitly *not* the real art pipeline.
 //! - `panels`: the egui panels themselves (time control, tile inspector,
-//!   action queue, economy/sell).
-//!
-//! **Confirmed against the real `v0.34.1` crate (not just guessed, per
-//! the compile error this fixed):** `EguiPlugin` at this version is a
-//! plain struct with an `enable_multipass_for_primary_context: bool`
-//! field and no usable `EguiPlugin::default()` the way later versions
-//! support - it must be constructed explicitly with that field set to
-//! `true` to run UI systems in the `EguiContextPass` schedule, matching
-//! every example in the actual `v0.34.1` tag.
+//!   action queue, economy/sell, camera zoom buttons).
 
 pub mod panels;
 pub mod render;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContextPass, EguiPlugin};
+
+pub use render::CameraState;
 
 /// Currently-clicked tile, read by every tile-targeted panel (inspector,
 /// action queue). `None` until the player clicks a tile for the first
@@ -57,15 +50,29 @@ impl Plugin for UiPlugin {
         })
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
+            // `CameraState` is inserted explicitly by `render::setup_camera`
+            // (Startup, so it exists before any Update system reads it),
+            // seeded with the farm's actual center - not `init_resource`,
+            // since that would default to `Vec2::ZERO` and cause a
+            // visible one-frame snap on the very first frame.
             .add_systems(Startup, render::setup_camera)
             .add_systems(
                 Update,
-                (render::spawn_tile_visuals, render::sync_tile_visuals, render::tile_click_system).chain(),
+                (
+                    // Camera pan/zoom input + apply run first each
+                    // frame, so tile click-select below uses this
+                    // frame's camera transform, not last frame's -
+                    // matters most right after a zoom/pan input, where
+                    // using a stale transform could pick the wrong
+                    // tile.
+                    render::camera_input_system,
+                    render::camera_apply_system,
+                    render::spawn_tile_visuals,
+                    render::sync_tile_visuals,
+                    render::tile_click_system,
+                )
+                    .chain(),
             )
-            // Ordered so panel layout is sensible (top bar first claims
-            // the top strip, then side panels, then the bottom economy
-            // bar) - order here doesn't affect correctness, just how
-            // egui carves up remaining screen space between panels.
             .add_systems(
                 EguiContextPass,
                 (
