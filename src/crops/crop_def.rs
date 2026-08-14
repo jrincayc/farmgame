@@ -7,6 +7,7 @@ use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext};
 use bevy::prelude::*;
 use serde::Deserialize;
+use std::fmt;
 
 /// A crop's static definition, loaded from `assets/crops/*.json` via
 /// `CropDefLoader`. See the field-by-field schema note below for the
@@ -89,6 +90,18 @@ impl QualityGrade {
     }
 }
 
+impl fmt::Display for QualityGrade {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}",
+               match self {
+                   QualityGrade::Poor => "Poor",
+                   QualityGrade::Good => "Good",
+                   QualityGrade::Premium => "Premium",
+               }
+        )
+    }
+}
+
 pub fn quality_grade(worst_single_day_stress: f32, thresholds: &QualityThresholds) -> QualityGrade {
     if worst_single_day_stress <= thresholds.premium_max_stress {
         QualityGrade::Premium
@@ -112,7 +125,7 @@ pub fn quality_grade(worst_single_day_stress: f32, thresholds: &QualityThreshold
 ///
 /// Both constants are §5-style placeholders (design doc's own term for
 /// numbers that are a playtesting question, not an architecture one).
-const YIELD_STRESS_DIVISOR: f32 = 20.0;
+const YIELD_STRESS_DIVISOR: f32 = 200.0;
 const MIN_SOIL_YIELD_FACTOR: f32 = 0.3;
 
 pub fn yield_amount(cumulative_stress: f32, fertility: f32, moisture: f32, base_yield: u32) -> u32 {
