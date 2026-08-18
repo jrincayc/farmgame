@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::crops::QualityGrade;
 
@@ -19,7 +20,12 @@ use crate::crops::QualityGrade;
 /// entries default to `1.0` (see `Market::time_factor`) rather than
 /// requiring every crop id to be pre-populated here - keeps this
 /// correct even if a new crop JSON is added without a matching entry.
-#[derive(Resource, Debug, Clone, Default)]
+///
+/// **Phase 7 addition:** `Serialize`/`Deserialize` so `save::SaveGame`
+/// can persist it directly - always empty for MVP today (no stretch
+/// pricing system writes into it yet), but included now so a save file
+/// doesn't need a schema migration once that stretch goal lands.
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Market {
     pub price_modifiers: HashMap<String, f32>,
 }
@@ -77,7 +83,6 @@ mod tests {
         let mut market = Market::default();
         market.price_modifiers.insert("tomato".to_string(), 1.2);
         assert_eq!(market.time_factor("tomato"), 1.2);
-        // Unrelated crop id is unaffected and still defaults to 1.0.
         assert_eq!(market.time_factor("wheat"), 1.0);
     }
 }

@@ -1,8 +1,9 @@
-//! egui panels (Phase 6, + camera zoom buttons added in the pan/zoom
-//! batch) - the real UI replacing the dev keyboard controls from
-//! Phases 4-5. Reads/writes the same resources those dev controls did
-//! (`ActionQueue`, `Wallet`, `Inventory`, `TimeControl`), so this is a
-//! UI-only addition, not a simulation-logic change.
+//! egui panels (Phase 6, + camera zoom buttons from the pan/zoom batch,
+//! + a save/load panel from Phase 7) - the real UI replacing the dev
+//! keyboard controls from Phases 4-5. Reads/writes the same resources
+//! those dev controls did (`ActionQueue`, `Wallet`, `Inventory`,
+//! `TimeControl`), so this is a UI-only addition, not a
+//! simulation-logic change.
 //!
 //! Requirements §4.6a: the action-queue panel is intentionally
 //! FIFO-display-only - no reorder/cancel controls, even though
@@ -16,6 +17,7 @@ use bevy_egui::{egui, EguiContexts};
 use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, NextActionId, PendingAction};
 use crate::economy::{Inventory, SellRequested, Wallet};
 use crate::farm::{FarmConfig, TileMap};
+use crate::save::{DeleteSaveRequested, LoadRequested, SaveRequested, SAVE_DIR};
 use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed};
 
 use super::render::{farm_world_center, BUTTON_ZOOM_STEP, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
@@ -46,9 +48,9 @@ fn time_mode_label(mode: &TimeMode) -> String {
     }
 }
 
-/// Top bar: day/season readout, time control, theme toggle, and (new)
-/// camera zoom controls. Applies the current `UiTheme` to the egui
-/// context every frame (idempotent, cheap) rather than only on toggle.
+/// Top bar: day/season readout, time control, theme toggle, and camera
+/// zoom controls. Applies the current `UiTheme` to the egui context
+/// every frame (idempotent, cheap) rather than only on toggle.
 pub fn top_bar(
     mut contexts: EguiContexts,
     mut theme: ResMut<UiTheme>,
@@ -100,11 +102,6 @@ pub fn top_bar(
             ui.label(time_mode_label(&control.mode));
 
             ui.separator();
-            // Camera zoom controls (new). Pan is keyboard-arrow /
-            // middle-click-drag / Ctrl+left-drag only - no pan buttons,
-            // per the plan, since those three input methods already
-            // cover it and a fourth (button-based) pan control would
-            // be redundant.
             if ui.button("Zoom Out").clicked() {
                 camera_state.zoom_factor =
                     (camera_state.zoom_factor / BUTTON_ZOOM_STEP).clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
@@ -129,9 +126,7 @@ pub fn top_bar(
 }
 
 /// Selected-tile inspector (design doc §2.3/§2.4's fields, surfaced
-/// read-only). Reachable state matches what the dev-control console log
-/// used to print, now attached to whichever tile the player actually
-/// clicked (`render::tile_click_system`) instead of hardcoded (0,0).
+/// read-only).
 pub fn tile_inspector_panel(
     mut contexts: EguiContexts,
     selected: Res<SelectedTile>,
@@ -336,5 +331,73 @@ pub fn economy_panel(
                 }
             }
         });
+    });
+}
+
+/// Save/load panel (Phase 7) - a floating egui window rather than a
+/// docked side/top/bottom panel, so it doesn't compete for screen space
+/// with the four panels above; the player can drag it out of the way or
+/// collapse it via egui's own window chrome.
+///
+/// Re-scans `save/*.json` from disk every frame the window is open
+/// (`std::fs::read_dir`, same low-tech pattern `crops::roster::
+/// CropRoster` uses at startup) rather than caching a save-list
+/// resource - simplest thing that works at "a handful of save files"
+/// scale, and it means a save made in one click always shows up in the
+/// list without needing a manual refresh or a change-detection setup.
+pub fn save_load_panel(
+    mut contexts: EguiContexts,
+    mut save_name: Local<String>,
+    mut save_requests: EventWriter<SaveRequested>,
+    mut load_requests: EventWriter<LoadRequested>,
+    mut delete_requests: EventWriter<DeleteSaveRequested>,
+) {
+    egui::Window::new("Save / Load").default_open(true).show(contexts.ctx_mut(), |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Name:");
+            ui.text_edit_singleline(&mut *save_name);
+            let name_trimmed = save_name.trim();
+            if ui
+                .add_enabled(!name_trimmed.is_empty(), egui::Button::new("Save"))
+                .clicked()
+            {
+                save_requests.write(SaveRequested {
+                    name: name_trimmed.to_string(),
+                });
+            }
+        });
+
+        ui.separator();
+        ui.label("Existing saves:");
+
+        let mut names: Vec<String> = std::fs::read_dir(SAVE_DIR)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    path.file_stem().and_then(|s| s.to_str()).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        names.sort();
+
+        if names.is_empty() {
+            ui.label("(no saves yet)");
+        }
+        for name in names {
+            ui.horizontal(|ui| {
+                ui.label(&name);
+                if ui.button("Load").clicked() {
+                    load_requests.write(LoadRequested { name: name.clone() });
+                }
+                if ui.button("Delete").clicked() {
+                    delete_requests.write(DeleteSaveRequested { name: name.clone() });
+                }
+            });
+        }
     });
 }

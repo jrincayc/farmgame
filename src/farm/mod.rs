@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::climate::WeatherToday;
 use crate::crops::{CropDef, PlantedCrop};
@@ -19,7 +20,12 @@ use crate::time::DayAdvanced;
 /// (design doc §2.3, requirements §4.2/§9), so a future player-facing
 /// size picker just means writing into this resource before world-gen
 /// runs instead of after — tile-spawning code itself doesn't change.
-#[derive(Resource, Debug, Clone)]
+///
+/// **Phase 7 addition:** `Serialize`/`Deserialize` so a save file can
+/// carry the farm's actual size — loading a save must rebuild the grid
+/// at *that* size, not whatever `FarmConfig::default()` happens to be
+/// for the currently-running instance.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
 pub struct FarmConfig {
     pub width: u32,
     pub height: u32,
@@ -50,7 +56,12 @@ pub struct Tile {
     pub coord: IVec2,
 }
 
-#[derive(Component, Debug, Clone)]
+/// **Phase 7 addition:** `Serialize`/`Deserialize` so a per-tile save
+/// entry (`save::SavedTile`) can embed this directly rather than
+/// needing its own mirror struct — every field here is a plain value
+/// (no `Entity`/`Handle`), unlike `PlantedCrop`, which does need a
+/// mirror (`save::SavedCrop`) because of its `Handle<CropDef>`.
+#[derive(Component, Debug, Clone, Serialize, Deserialize)]
 pub struct SoilState {
     /// 0.0-1.0.
     pub fertility: f32,
@@ -67,7 +78,7 @@ pub struct SoilState {
     pub tilled: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SoilType {
     Sandy,
     Loamy,
@@ -124,11 +135,22 @@ impl Plugin for FarmPlugin {
     }
 }
 
-/// Spawns one entity per tile across `FarmConfig`'s bounds (clamped to
-/// its own min/max, in case something inserts an out-of-range config
-/// before this runs), each with a `Tile` (coordinate) and `SoilState`
-/// component, and records it in `TileMap` for coordinate lookup.
-fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: ResMut<TileMap>) {
+/// Deterministic but varied starting soil layout — see
+/// `starting_soil_type` below for the actual assignment. Shared by
+/// `spawn_tile_grid` for both the Startup spawn and (Phase 7)
+/// `save::load_game`'s rebuild, so a freshly-loaded farm gets sensible
+/// placeholder soil for any tile the save doesn't have (shouldn't
+/// happen in practice, since load rebuilds at the saved dimensions
+/// exactly, but keeps the function total rather than assuming the
+/// caller always overwrites every tile).
+///
+/// **Phase 7 factor-out:** this used to be the body of `spawn_tiles`
+/// directly. Pulled into its own `pub` function so `save::load_game`
+/// can rebuild the grid at a saved farm size without duplicating the
+/// dimension-clamping/soil-assignment logic — the whole point being
+/// that grid construction only exists in one place, called from two
+/// contexts (Startup, and a save load).
+pub fn spawn_tile_grid(commands: &mut Commands, config: &FarmConfig, tile_map: &mut TileMap) {
     let width = config
         .width
         .clamp(FarmConfig::MIN_DIMENSION, FarmConfig::MAX_DIMENSION);
@@ -153,11 +175,39 @@ fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: Re
             tile_map.tiles.insert(coord, entity);
         }
     }
+}
+
+/// Despawns every existing tile entity — `.despawn()` on Bevy 0.16
+/// despawns descendants too (the `ui::render` label child included), so
+/// this doesn't need a separate `despawn_recursive` call. **Compile-risk
+/// note**, same spirit as other flagged spots in this codebase: this is
+/// matched against Bevy 0.16's documented default-recursive-despawn
+/// behavior from memory, not confirmed via `cargo check` here — if a
+/// tile's label sprite survives a load, this is the first place to
+/// check.
+///
+/// Clears `TileMap` too, since every entity in it is about to be
+/// invalid. Used by `save::load_game` (Phase 7) before rebuilding the
+/// grid at the save's `FarmConfig` size, which may differ from
+/// whatever's currently running.
+pub fn despawn_all_tiles(commands: &mut Commands, tile_map: &mut TileMap, tiles: &Query<Entity, With<Tile>>) {
+    for entity in tiles.iter() {
+        commands.entity(entity).despawn();
+    }
+    tile_map.tiles.clear();
+}
+
+/// Spawns one entity per tile across `FarmConfig`'s bounds (clamped to
+/// its own min/max, in case something inserts an out-of-range config
+/// before this runs), each with a `Tile` (coordinate) and `SoilState`
+/// component, and records it in `TileMap` for coordinate lookup.
+fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: ResMut<TileMap>) {
+    spawn_tile_grid(&mut commands, &config, &mut tile_map);
 
     info!(
         "Spawned {} x {} = {} farm tiles",
-        width,
-        height,
+        config.width.clamp(FarmConfig::MIN_DIMENSION, FarmConfig::MAX_DIMENSION),
+        config.height.clamp(FarmConfig::MIN_DIMENSION, FarmConfig::MAX_DIMENSION),
         tile_map.tiles.len()
     );
 }
@@ -254,37 +304,13 @@ mod tests {
     fn test_app(config: FarmConfig) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        // AssetPlugin (normally pulled in by DefaultPlugins, which
-        // these tests deliberately avoid for speed) provides the
-        // AssetServer resource. CropsPlugin::build calls
-        // init_asset_loader::<CropDefLoader>(), which panics without
-        // AssetServer already present - init_asset::<CropDef>() alone
-        // (registering the Assets<CropDef> resource) isn't enough.
-        // MinimalPlugins doesn't include AssetPlugin, so it's added
-        // explicitly here, ahead of CropsPlugin.
         app.add_plugins(bevy::asset::AssetPlugin::default());
         app.add_plugins(TimePlugin);
         app.add_plugins(ClimatePlugin);
-        // CropsPlugin registers the CropDef asset type/loader that
-        // degrade_soil's Res<Assets<CropDef>> param needs to exist as a
-        // resource, even though these farm-module tests never actually
-        // load a crop (every tile stays fallow, same as Phase 3's
-        // tests).
         app.add_plugins(CropsPlugin);
-        // CropsPlugin also registers process_action_queue (via
-        // CropsQueuePlugin), which reads/writes Wallet and Inventory -
-        // both from EconomyPlugin, not CropsPlugin itself. The queue
-        // stays empty in every farm test below, so this system is a
-        // no-op each run, but Bevy still validates its resource params
-        // exist before running it, so the resources have to be present
-        // regardless of whether anything's actually queued.
         app.add_plugins(EconomyPlugin);
         app.add_plugins(FarmPlugin);
         crate::sim_order::configure(&mut app);
-        // Overwrites the FarmConfig that FarmPlugin::build already
-        // inserted via init_resource - safe because Startup (where
-        // spawn_tiles reads it) hasn't run yet; that happens on the
-        // first app.update() below.
         app.insert_resource(config);
         app
     }
@@ -300,7 +326,7 @@ mod tests {
             width: 40,
             height: 35,
         });
-        app.update(); // runs Startup
+        app.update();
 
         assert_eq!(app.world().resource::<TileMap>().tiles.len(), 40 * 35);
     }
@@ -333,16 +359,11 @@ mod tests {
 
     #[test]
     fn fallow_fertility_drifts_up_toward_baseline_from_below() {
-        // width/height of 1 still clamps up to MIN_DIMENSION (32x32) in
-        // spawn_tiles - fine here since every tile gets set uniformly
-        // below and moves in the same direction regardless of its
-        // SoilType's regen rate; we just read back one representative
-        // tile.
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,
         });
-        app.update(); // spawn
+        app.update();
 
         {
             let mut query = app.world_mut().query::<&mut SoilState>();
@@ -390,22 +411,6 @@ mod tests {
 
     #[test]
     fn fertility_settles_near_baseline_rather_than_maxing_out() {
-        // Regression guard for the design-doc pseudocode bug described
-        // above: a flat additive delta would eventually clamp fertility
-        // at 1.0 no matter the starting point. The corrected
-        // baseline-drift formula should instead converge near
-        // FALLOW_FERTILITY_BASELINE and stay there. Starts well below
-        // baseline (spawn_tiles already starts tiles *at* baseline,
-        // which would make this test vacuous - both formulas leave an
-        // already-at-baseline value alone).
-        //
-        // Note: FarmConfig{1,1} still clamps up to 32x32 (MIN_DIMENSION)
-        // and mixes all three SoilTypes, each with a different regen
-        // rate. 400 days comfortably covers even Sandy's slowest rate
-        // (0.015/day: convergence to within 0.01 of baseline needs
-        // ~265 days from a 0.55 gap), so every tile - not just
-        // whichever one `all_soil(..)[0]` happens to be - should have
-        // converged by the time we check.
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,

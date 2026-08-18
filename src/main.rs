@@ -13,6 +13,7 @@ mod climate;
 mod crops;
 mod economy;
 mod farm;
+mod save;
 mod sim_order;
 mod time;
 mod ui;
@@ -38,6 +39,7 @@ fn main() {
     .add_plugins(FarmPlugin)
     .add_plugins(CropsPlugin)
     .add_plugins(EconomyPlugin)
+    .add_plugins(save::SavePlugin)
     .add_plugins(UiPlugin)
     .add_systems(Startup, print_dev_controls)
     .add_systems(Update, dev_keyboard_controls)

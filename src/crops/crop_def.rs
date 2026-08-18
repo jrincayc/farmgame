@@ -6,7 +6,7 @@
 use bevy::asset::io::Reader;
 use bevy::asset::{AssetLoader, LoadContext};
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A crop's static definition, loaded from `assets/crops/*.json` via
@@ -73,7 +73,12 @@ pub struct GrowthStage {
 /// quality). Multiplies `sell_price` at sale time (requirements §4.5) —
 /// the multiplier itself lives on `QualityGrade` since it's intrinsic to
 /// the grade, not something each caller should redefine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **Phase 7 addition:** `Serialize`/`Deserialize` — `economy::Inventory`
+/// (persisted directly in `save::SaveGame`) stores `HarvestedLot`s that
+/// embed this enum, so it needs to round-trip through JSON like every
+/// other saved field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QualityGrade {
     Poor,
     Good,
@@ -164,20 +169,6 @@ impl From<serde_json::Error> for CropDefLoaderError {
 /// Loads `CropDef` from `assets/crops/*.json` (requirements §3: JSON for
 /// crop data, via a custom `AssetLoader<CropDef>` backed by
 /// `serde_json`, exactly as the tech-stack section specifies).
-///
-/// **Highest compile-risk file in this batch.** I've matched this to
-/// Bevy's official `custom_asset` example pattern as best I can from
-/// memory, but I have not compiled this against the exact 0.16.1
-/// `bevy_asset` API surface (per your request not to run `cargo check`
-/// here). If this file errors, the likely culprits, in order:
-/// 1. `async fn load(...)` in the trait impl — some Bevy versions want a
-///    `BoxedFuture` return instead of native `async fn`. If so, wrap the
-///    body in `Box::pin(async move { ... })` and change the signature to
-///    return `bevy::asset::BoxedFuture<'_, Result<Self::Asset, Self::Error>>`.
-/// 2. `reader.read_to_end(&mut bytes).await?` — if `read_to_end` isn't
-///    found, it likely needs `use futures_lite::AsyncReadExt;` (a
-///    transitive dep already in Cargo.lock via bevy_asset, but not a
-///    direct dependency yet — would need adding to `Cargo.toml`).
 #[derive(Default)]
 pub struct CropDefLoader;
 
@@ -232,10 +223,6 @@ mod tests {
 
     #[test]
     fn yield_amount_never_goes_below_soil_floor() {
-        // Even with catastrophic stress, MIN_SOIL_YIELD_FACTOR alone
-        // can't save yield - stress_factor legitimately bottoms out at
-        // 0, so total yield is 0. This test instead checks that decent
-        // stress + terrible soil doesn't zero out yield entirely.
         let amount = yield_amount(0.0, 0.0, 0.0, 100);
         assert!(amount > 0, "expected soil floor to keep some yield, got {amount}");
     }

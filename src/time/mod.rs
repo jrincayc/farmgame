@@ -7,11 +7,17 @@
 //! rather than running on a real-time tick (design doc §1.1).
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// Absolute day count since game start, plus the length of a "year" for
 /// deriving season-like labels elsewhere. Intentionally dumb: it just
 /// counts (design doc §2.1).
-#[derive(Resource, Debug, Clone)]
+///
+/// **Phase 7 addition:** `Serialize`/`Deserialize` so `save::SaveGame`
+/// can persist it directly, no separate `SavedCalendar` mirror needed —
+/// unlike `PlantedCrop`/`ActionQueue`, nothing here references an
+/// `Entity` or asset `Handle`, so a straight derive is safe.
+#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
 pub struct Calendar {
     pub current_day: u32,
     pub year_length: u32,

@@ -43,12 +43,9 @@ impl TempCurve {
     pub fn temp_on(&self, day_of_year: u32, year_length: u32) -> f32 {
         match self {
             TempCurve::Sine { min, max, phase_offset } => {
-                // Guard against a degenerate year_length (shouldn't
-                // happen with Calendar's own default/validation, but a
-                // pure function shouldn't panic on bad input either).
                 let year_length = (year_length as f32).max(1.0);
                 let fraction = (day_of_year as f32 + phase_offset) / year_length;
-                let wave = (fraction * std::f32::consts::TAU).sin(); // -1.0..=1.0
+                let wave = (fraction * std::f32::consts::TAU).sin();
                 let mid = (min + max) / 2.0;
                 let amplitude = (max - min) / 2.0;
                 mid + amplitude * wave
@@ -62,6 +59,11 @@ impl TempCurve {
 /// doesn't assume singleton-ness, so multi-region later means changing
 /// *how* `Region` is looked up (per-farm entity vs. global resource),
 /// not the climate math itself.
+///
+/// **Not persisted (Phase 7).** `Region` isn't part of `save::SaveGame`
+/// - it's a single fixed climate for MVP (requirements §6), not
+/// per-save-file data, so a save/load round-trip leaves it untouched.
+/// Worth revisiting if/when multi-region ever lands.
 #[derive(Resource, Debug, Clone)]
 pub struct Region {
     pub base_temp_curve: TempCurve,
@@ -75,13 +77,8 @@ pub struct Region {
 
 impl Default for Region {
     fn default() -> Self {
-        // Placeholder "temperate" climate - like the other numbers
-        // flagged in design doc §5, real values are a playtesting
-        // question. Ties its frost window to Calendar's own default
-        // year_length so the two placeholders stay self-consistent if
-        // either changes.
         let year_length = Calendar::default().year_length;
-        let frost_window = year_length / 4; // rough "coldest quarter"
+        let frost_window = year_length / 4;
 
         Self {
             base_temp_curve: TempCurve::Sine {
@@ -119,18 +116,10 @@ fn day_of_year(day: u32, year_length: u32) -> u32 {
     }
 }
 
-/// Chance that any given day has rain at all. Gated separately from the
-/// rainfall *amount* below so most days come out bone dry rather than
-/// every day getting a small drizzle — a placeholder like the other
-/// numbers flagged in design doc §5; requirements §4.4's seasonal
-/// drought/frost risk would mean varying this by day-of-year rather than
-/// using one constant, which is a natural follow-up once soil moisture
-/// (Phase 3) gives a reason to care about the difference.
+/// Chance that any given day has rain at all.
 const RAIN_CHANCE_PER_DAY: f64 = 0.35;
 
-/// Chance that a day inside `Region.frost_days` actually produces frost,
-/// rather than every such day being frost automatically. A placeholder
-/// like the numbers flagged in design doc §5 — tune during playtesting.
+/// Chance that a day inside `Region.frost_days` actually produces frost.
 const FROST_CHANCE_ON_RISK_DAY: f64 = 0.4;
 
 pub struct ClimatePlugin;
@@ -158,11 +147,6 @@ fn advance_day(
         let doy = day_of_year(ev.new_day, calendar.year_length);
         let mut rng = rand::thread_rng();
 
-        // Two-stage roll: does it rain at all today, and if so, how
-        // much? Rolling a single continuous 0.0..=1.0 value every day
-        // (the original approach) meant every day got *some* rainfall,
-        // just sometimes a trace amount — this instead gives most days
-        // zero, with real rain on the days it does happen.
         weather.rainfall = if rng.gen_bool(RAIN_CHANCE_PER_DAY) {
             rng.gen_range(0.0_f32..=1.0_f32)
         } else {
@@ -201,8 +185,6 @@ mod tests {
             phase_offset: 3.7,
         };
         let year_length = 112;
-        // day_of_year wraps via `% year_length`, so day 0 of year 2
-        // should read identically to day 0 of year 1.
         let t1 = curve.temp_on(day_of_year(0, year_length), year_length);
         let t2 = curve.temp_on(day_of_year(year_length * 2, year_length), year_length);
         assert_eq!(t1, t2);
@@ -219,15 +201,11 @@ mod tests {
 
     #[test]
     fn day_of_year_handles_degenerate_year_length() {
-        // A pure function shouldn't panic on bad input, even though
-        // Calendar's own default never produces year_length == 0.
         assert_eq!(day_of_year(5, 0), 0);
     }
 
     #[test]
     fn rain_and_frost_chance_constants_are_valid_probabilities() {
-        // Cheap guard against a typo (e.g. 3.5 instead of 0.35) rather
-        // than a meaningful statistical test of the RNG itself.
         assert!((0.0..=1.0).contains(&RAIN_CHANCE_PER_DAY));
         assert!((0.0..=1.0).contains(&FROST_CHANCE_ON_RISK_DAY));
     }

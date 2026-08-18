@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::farm::SoilState;
 use crate::sim_order::DayAdvanceOrder;
@@ -26,7 +27,13 @@ use crate::economy::{Inventory, Wallet};
 /// to resolve through, on its own capacity bucket rather than overloading
 /// `Till`'s - clearing debris and tilling a field are different
 /// equipment in practice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// **Phase 7 addition:** `Serialize`/`Deserialize` - both
+/// `save::SavedAction` (mirrors `PendingAction`) and
+/// `save::SavedEquipment` (mirrors `Equipment::daily_capacity`, a
+/// `HashMap<ActionKind, u32>`) need this enum to round-trip through
+/// JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ActionKind {
     Till,
     Plant,
@@ -40,7 +47,9 @@ pub struct PendingAction {
     /// Stable handle for future reorder/cancel UI (requirements §9,
     /// design doc §2.7's resolved open question) - not used for
     /// anything yet since MVP's queue UI (Phase 6) is FIFO-display-only,
-    /// but the data supports it from day one.
+    /// but the data supports it from day one. **Phase 7:** also what
+    /// lets a loaded save's queue preserve its original ordering/ids
+    /// rather than renumbering on load.
     pub id: u64,
     pub tile: Entity,
     pub kind: ActionKind,
@@ -107,9 +116,6 @@ fn process_action_queue(
             let done = done_today.entry(action.kind).or_insert(0);
 
             if *done >= cap {
-                // Equipment capacity exhausted for this kind today -
-                // carries over to the next DayAdvanced (requirements
-                // §4.6a), still in its original queue position.
                 still_pending.push_back(action);
                 continue;
             }
@@ -124,14 +130,6 @@ fn process_action_queue(
                 &mut commands,
             );
             *done += 1;
-            // Whether resolve_action actually applied the action or
-            // dropped it as invalid (funds/tile-state changed since
-            // queued - design doc §3.1a), it's consumed from the queue
-            // and counted against today's capacity either way. This
-            // matches §3.1a's own pseudocode: the `retain` closure
-            // removes an item once capacity allows processing it,
-            // regardless of whether the underlying action turned out to
-            // still be valid.
         }
 
         queue.pending = still_pending;
@@ -180,12 +178,6 @@ fn resolve_action(
                 warn!("tile already has a crop, dropping queued Plant action");
                 return;
             }
-            // Precondition added in Phase 4: a tile must be freshly
-            // tilled before it can be planted, and planting consumes
-            // that tilled state - a field needs re-tilling between
-            // crops, not just once ever. This gives Till a real,
-            // recurring throughput role rather than being a one-time
-            // formality.
             if !soil.tilled {
                 warn!("tile not tilled, dropping queued Plant action");
                 return;

@@ -5,11 +5,13 @@
 //! which Phase 3 left as a documented gap since `PlantedCrop`/`CropDef`
 //! didn't exist yet.
 //!
-//! **Roster note:** `roster.rs` (new) discovers `assets/crops/*.json` at
+//! **Roster note:** `roster.rs` discovers `assets/crops/*.json` at
 //! startup rather than any code hardcoding the crop list - see its
 //! module doc. This is what lets `ui::panels`' Plant dropdown and
 //! `ui::render`'s tile-letter labels stay correct for any crop roster,
-//! not just the four starter crops.
+//! not just the four starter crops, and (Phase 7) what `save::load_game`
+//! uses to re-resolve a saved crop-id string back into a live
+//! `Handle<CropDef>`.
 
 pub mod crop_def;
 pub mod equipment;
@@ -17,14 +19,6 @@ pub mod growth;
 pub mod queue;
 pub mod roster;
 
-// Some of these re-exports (GrowthStage, QualityThresholds,
-// quality_grade, yield_amount) aren't yet called by name outside
-// crops:: itself - `cargo check` correctly flags that as unused in a
-// binary crate with no external consumers. Kept anyway (rather than
-// dropped) as intentional public API surface for this module - e.g.
-// `ui::panels` or a future save/load module may construct/inspect
-// these directly. Silenced explicitly rather than left as an unaddressed
-// warning.
 #[allow(unused_imports)]
 pub use crop_def::{quality_grade, yield_amount, CropDef, CropDefLoader, GrowthStage, QualityGrade, QualityThresholds};
 pub use equipment::Equipment;

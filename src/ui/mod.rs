@@ -1,21 +1,22 @@
 //! UI (design doc §1's `ui/` module note: "reads from the others but
 //! doesn't own simulation state"; requirements §4.0's light/dark theme
 //! requirement; §4.6a's FIFO-only queue display) - **Phase 6**, plus a
-//! camera pan/zoom addition (see `render.rs`'s module doc for why that
-//! overrides the earlier deferral).
+//! camera pan/zoom addition (see `render.rs`'s module doc) and (Phase 7)
+//! a save/load panel (see `panels::save_load_panel`).
 //!
 //! Two halves, split across submodules:
 //! - `render`: a placeholder top-down tile grid (flat colored squares +
 //!   a text-letter label per tile), click-to-select, and camera
 //!   pan/zoom. Still explicitly *not* the real art pipeline.
 //! - `panels`: the egui panels themselves (time control, tile inspector,
-//!   action queue, economy/sell, camera zoom buttons).
+//!   action queue, economy/sell, camera zoom buttons, save/load).
 
 pub mod panels;
 pub mod render;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContextPass, EguiPlugin};
+use serde::{Deserialize, Serialize};
 
 pub use render::CameraState;
 
@@ -27,10 +28,13 @@ pub use render::CameraState;
 pub struct SelectedTile(pub Option<IVec2>);
 
 /// Light/dark toggle (requirements §4.0: both first-class, "Default
-/// theme TBD, likely Light"). Not yet persisted across runs - Phase 7
-/// (save/load) can read this resource once it exists without this
-/// module needing to change.
-#[derive(Resource, Debug, Clone, Copy)]
+/// theme TBD, likely Light").
+///
+/// **Phase 7:** now actually persisted, per the memory note this was
+/// "already structured as a plain resource for easy persistence" -
+/// `Serialize`/`Deserialize` added, and `save::SaveGame` carries it
+/// directly.
+#[derive(Resource, Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UiTheme {
     pub dark: bool,
 }
@@ -50,21 +54,10 @@ impl Plugin for UiPlugin {
         })
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
-            // `CameraState` is inserted explicitly by `render::setup_camera`
-            // (Startup, so it exists before any Update system reads it),
-            // seeded with the farm's actual center - not `init_resource`,
-            // since that would default to `Vec2::ZERO` and cause a
-            // visible one-frame snap on the very first frame.
             .add_systems(Startup, render::setup_camera)
             .add_systems(
                 Update,
                 (
-                    // Camera pan/zoom input + apply run first each
-                    // frame, so tile click-select below uses this
-                    // frame's camera transform, not last frame's -
-                    // matters most right after a zoom/pan input, where
-                    // using a stale transform could pick the wrong
-                    // tile.
                     render::camera_input_system,
                     render::camera_apply_system,
                     render::spawn_tile_visuals,
@@ -80,6 +73,12 @@ impl Plugin for UiPlugin {
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
                     panels::economy_panel,
+                    // New (Phase 7): save/load panel. Ordered last -
+                    // doesn't read/write anything the other panels
+                    // depend on this frame, so position relative to them
+                    // doesn't matter functionally, just kept at the end
+                    // for readability (newest addition, listed last).
+                    panels::save_load_panel,
                 )
                     .chain(),
             );
