@@ -453,9 +453,17 @@ pub fn tile_click_system(
         return;
     };
 
+    // Tiles are rendered center-anchored at `coord * TILE_STRIDE` (see
+    // `tile_world_pos` / `spawn_tile_visuals`), not corner-anchored at
+    // `coord * TILE_STRIDE` with the tile spanning forward from there.
+    // `.floor()` would hit-test the latter (a grid of corner-origin
+    // cells), which is a half-tile off from what's actually drawn -
+    // clicking near a tile's left/bottom edge would silently select its
+    // lower-left neighbor instead. Rounding to the nearest tile center
+    // matches the render grid instead.
     let coord = IVec2::new(
-        (world_pos.x / TILE_STRIDE).floor() as i32,
-        (world_pos.y / TILE_STRIDE).floor() as i32,
+        (world_pos.x / TILE_STRIDE).round() as i32,
+        (world_pos.y / TILE_STRIDE).round() as i32,
     );
 
     if tile_map.tiles.contains_key(&coord) {
