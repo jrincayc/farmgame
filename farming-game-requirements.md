@@ -122,6 +122,7 @@ This is more setup than a flat season enum, but it's what actually earns "data-d
 - Player movement and interaction with tiles/tools
 - Inventory system
 - Save/load game state
+- **Resolved (Phase 7):** implemented as JSON snapshot files under a repo-root `save/` directory (easy to `.gitignore` as a whole, per your preference), one file per save, multiple named saves supported (not a single overwriting slot). Triggered entirely from a UI panel (name field + Save button, plus a live list of existing saves with Load/Delete) — no keyboard shortcut. Persists `Calendar`, `Wallet`, `Inventory`, `Equipment`, `Market`, `UiTheme`, `FarmConfig`, every tile's soil/planted-crop state, and — per an explicit decision to persist mid-plan state rather than requiring an empty queue at save time — the `ActionQueue` itself. `TimeControl`'s mode is *not* persisted; loading always resumes Paused. See design doc §2.8/§3.7 for the schema and re-resolution details.
 
 ### 4.6a Equipment & Action Queue
 
@@ -163,7 +164,7 @@ To keep this achievable as a first game project:
 - Time control: Paused / Step / Timer (fixed set of speeds)
 - Action queue (§4.6a) with one fixed, non-purchasable default equipment set
 - Plant → grow → harvest → sell loop, with static-formula sell pricing (quality-multiplied, `time_factor` fixed at 1.0)
-- Manual save/load (JSON)
+- Manual save/load (JSON) — **done, Phase 7** (see §4.6)
 
 Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock, combat, crafting, multiple seasons/years, weather beyond basic rain, conditional/rule-based scheduling (§4.7), purchasable equipment upgrades, greenhouses/tile climate modifiers (§4.3a), futures market/variable pricing.
 

@@ -18,16 +18,23 @@ Requires the exact-pinned Bevy `0.16.0` and `bevy_egui` `0.34.1` from
 bump + review, since Bevy's API drifts significantly between minor
 versions.
 
-## Current status: Phase 6 (UI — egui panels + placeholder tile rendering)
+## Current status: Phase 7 (save/load)
 
-`cargo run` now opens a window with a real UI: a top bar (day/season,
-time control, theme toggle), a left panel (action queue), a right panel
-(selected-tile inspector), and a bottom bar (wallet/inventory/sell).
-The farm itself renders as a placeholder grid — flat colored squares
-with a crop-initial text label per tile — clickable to select a tile;
-this is explicitly not the real art pipeline (see the design doc's §10
-note in the requirements doc), just enough for tile-targeted UI to be
-meaningful. Dev keyboard controls from Phases 4–5 still work too.
+`cargo run` opens a window with a full UI: a top bar (day/season, time
+control, theme toggle, camera zoom), a left panel (action queue), a
+right panel (selected-tile inspector), a bottom bar
+(wallet/inventory/sell), and a floating Save/Load window. The farm
+renders as a placeholder grid — flat colored squares with a crop-initial
+text label per tile, clickable to select — with pan (arrow keys,
+middle-click-drag, or Ctrl/Cmd+left-click-drag) and zoom (scroll wheel
+or top-bar buttons); this is explicitly not the real art pipeline (see
+requirements doc §10), just enough for tile-targeted UI to be
+meaningful on a multi-thousand-tile farm. Dev keyboard controls from
+Phases 4–5 still work too.
+
+Saves are JSON files under `save/<name>.json` at the repo root — add
+`/save/` to your local `.gitignore` if you haven't already, since save
+files are player data, not something to commit.
 
 Implementation proceeds in phases per the agreed plan:
 
@@ -36,11 +43,9 @@ Implementation proceeds in phases per the agreed plan:
 3. **Farm tiles + soil** — done. `FarmConfig`, `Tile`/`SoilState`/`SoilType`, `degrade_soil`
 4. **Crops** — done. Data-driven `CropDef` assets, growth tick, action queue, starter roster (Tomato, Wheat, Carrot, Green Bean)
 5. **Economy** — done. `Market`/`sale_value`, instant sell flow (`SellRequested` event, not queued)
-6. **UI** *(current)* — `bevy_egui` panels (time/theme/queue/inspector/economy), placeholder tile rendering + click-to-select
-7. Save/load
+6. **UI** — done. `bevy_egui` panels (time/theme/queue/inspector/economy), placeholder tile rendering + click-to-select, camera pan/zoom (pulled forward from the rendering phase — see requirements doc §10)
+7. **Save/load** *(current)* — `save::SavePlugin`, JSON snapshots under `save/`, multiple named saves, persists `ActionQueue` (not originally planned — see design doc §2.8/§3.7)
 8. Polish + balancing
-
-*(Rendering/art pipeline — real sprites, growth-stage art, soil overlays, camera pan/zoom — is a newer, not-yet-numbered phase; see requirements doc §10.)*
 
 ## Project layout
 
@@ -58,11 +63,14 @@ src/
 ├── economy/       # Wallet, Inventory, Market, sale_value, instant sell flow
 │   ├── market.rs     # Market resource + sale_value() (design doc §2.5)
 │   └── sell.rs        # SellRequested event + process_sell_requests
-└── ui/            # egui panels + placeholder tile rendering (Phase 6)
+├── save/          # save/load (Phase 7)
+│   └── mod.rs        # SavePlugin, SaveGame snapshot schema, save/load/delete systems
+└── ui/            # egui panels + placeholder tile rendering (Phase 6) + camera pan/zoom
     ├── mod.rs        # UiPlugin, SelectedTile/UiTheme resources
-    ├── render.rs      # camera, placeholder tile sprites/labels, click-to-select
-    └── panels.rs      # top bar, tile inspector, action queue, economy panels
+    ├── render.rs      # camera pan/zoom, placeholder tile sprites/labels, click-to-select
+    └── panels.rs      # top bar, tile inspector, action queue, economy, save/load panels
 assets/
 └── crops/         # crop definition JSON files: tomato, wheat, carrot, green_bean
+save/              # save files (JSON), created on first save — gitignore this
 build.rs           # copies assets/ into target/<profile>/assets/
 ```

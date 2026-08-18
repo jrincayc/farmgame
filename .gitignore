@@ -2,6 +2,7 @@
 *.swp
 .DS_Store
 *~
+save/
 
 # Cargo.lock is intentionally committed - this is a binary/application
 # crate, not a library, so we want reproducible builds across machines.

@@ -413,38 +413,60 @@ pub struct PendingAction {
 
 Processing (`crops::process_action_queue`, run early in the `DayAdvanced` chain, per §1.1): for each `ActionKind`, pop up to `Equipment.daily_capacity[kind]` matching entries off the front of `pending` and apply them; anything left in the queue simply waits for the next `DayAdvanced`. FIFO order per action kind keeps this predictable and legible to the player (§2 pillar) — "I queued these first, they happen first" — rather than needing a priority system for MVP. (A future reorder feature would let the player change that order before resolution; it wouldn't change how resolution itself works.)
 
-### 2.8 Save Data (Serialized snapshot)
+### 2.8 Save Data (Serialized snapshot) — **implemented, Phase 7**
 
-Rather than trying to serialize live ECS entities directly (fragile across versions), MVP save/load works through an explicit **snapshot struct** that systems populate from/apply to the world, written to disk as JSON via `serde_json::to_string_pretty` / `from_str`:
+Rather than trying to serialize live ECS entities directly (fragile across versions), save/load works through an explicit **snapshot struct** (`save::SaveGame`) that systems populate from/apply to the world, written to disk as JSON via `serde_json::to_string_pretty` / `from_str`, one file per save under `save/<name>.json` (requirements §4.6, resolved: multiple named saves, repo-root `save/` directory rather than an OS user-data dir, so it's trivially `.gitignore`-able as a whole).
 
 ```rust
 #[derive(Serialize, Deserialize)]
-pub struct SaveGame {
-    pub calendar: Calendar,
-    pub wallet: Wallet,
-    pub equipment: Equipment,
-    pub tiles: Vec<SavedTile>,
+struct SaveGame {
+    version: u32,
+    calendar: Calendar,
+    wallet: Wallet,
+    equipment: SavedEquipment,     // see note below on why this isn't Equipment directly
+    market: Market,
+    ui_theme: UiTheme,
+    farm_config: FarmConfig,
+    inventory: Inventory,
+    tiles: Vec<SavedTile>,
+    action_queue: Vec<SavedAction>, // see note below — persisted, contrary to this section's original plan
+    next_action_id: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SavedTile {
-    pub coord: IVec2,
-    pub soil: SoilState,
-    pub planted_crop: Option<SavedCrop>,
+struct SavedTile {
+    coord: IVec2,
+    soil: SoilState,
+    planted_crop: Option<SavedCrop>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SavedCrop {
-    pub crop_id: String,   // re-resolved to a Handle<CropDef> on load via asset server
-    pub planted_day: u32,
-    pub current_stage: usize,
-    pub days_in_stage: u32,
-    pub cumulative_stress: f32,
-    pub worst_single_day_stress: f32,
+struct SavedCrop {
+    crop_id: String,   // re-resolved to a Handle<CropDef> on load via CropRoster
+    planted_day: u32,
+    current_stage: usize,
+    days_in_stage: u32,
+    cumulative_stress: f32,
+    worst_single_day_stress: f32,
+    dead: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedAction {
+    id: u64,
+    tile_coord: IVec2,           // re-resolved to an Entity via the rebuilt TileMap
+    kind: ActionKind,
+    crop_to_plant: Option<String>, // re-resolved via CropRoster, same as SavedCrop
 }
 ```
 
-This indirection is deliberate: it means save-file format is decoupled from internal ECS layout, so refactoring components later doesn't corrupt old saves as badly (a stated non-functional requirement). Queued-but-unresolved `ActionQueue` entries are intentionally **not** persisted for MVP — simplest to just require the queue be empty (or accept it's cleared) on save; worth revisiting once scheduling (stretch) exists, since standing rules *would* need to survive a save/load.
+This indirection is deliberate: it means save-file format is decoupled from internal ECS layout, so refactoring components later doesn't corrupt old saves as badly (a stated non-functional requirement).
+
+**Revision from this section's original plan — `ActionQueue` *is* persisted.** The paragraph originally here said queued-but-unresolved actions weren't saved, on the reasoning that requiring an empty queue at save time was simplest for MVP. That was revisited before implementation: mid-plan saves (a paused game with several actions already queued) are common enough in how this gets played that dropping the queue on every save/load would be a real loss, not just a simplification. `PendingAction.tile` (an `Entity`) and `.crop_to_plant` (a `Handle<CropDef>`) don't survive serialization as-is, so `SavedAction` mirrors the same "store an id, re-resolve on load" pattern `SavedCrop` already used for `PlantedCrop.def`. A queued action referencing a tile or crop that no longer resolves after a load (crop JSON deleted, farm rebuilt at a different size than the save assumed — the latter shouldn't happen since the farm *is* rebuilt at the saved size, but is guarded regardless) is dropped with a `warn!`, not treated as a fatal load error.
+
+**`equipment: SavedEquipment`, not `Equipment` directly:** `Equipment::daily_capacity` is a `HashMap<ActionKind, u32>`. Serializing an enum-keyed `HashMap` straight to JSON depends on serde_json's map-key handling for non-string keys, which wasn't worth relying on unverified (no `cargo check` in this workflow — see the project's stated compile-risk convention). `SavedEquipment` instead stores the same data as `Vec<(ActionKind, u32)>`, which is unambiguous regardless.
+
+**What else changed from the original sketch:** `market: Market`, `ui_theme: UiTheme`, `farm_config: FarmConfig`, and `inventory: Inventory` weren't in this section's original `SaveGame` draft — `Inventory` in particular was a real gap (harvested-but-unsold goods would have vanished on load). All four are plain data with no `Entity`/`Handle` fields, so each derives `Serialize`/`Deserialize` directly on the live resource type rather than needing its own mirror struct — see each type's own Phase 7 doc-comment note (`economy::Wallet`/`Inventory`, `economy::Market`, `ui::UiTheme`, `farm::FarmConfig`, `farm::SoilState`) for the specifics. `TimeControl`/`TimeMode` are deliberately **not** persisted — `load_game` always resumes in `Paused`, regardless of what mode was active at save time, so a loaded game never starts ticking days via a Timer the player hasn't just set. `climate::Region` also isn't persisted — it's a single fixed MVP climate (requirements §6), not per-save data.
 
 ---
 
@@ -680,6 +702,18 @@ Two bugs found during Phase 6 playtesting, both closed together:
 2. **`CropDef` assets unloading between harvest and sell.** `process_sell_requests` (§2.5) looks up a `CropDef` by scanning `Assets<CropDef>` for a matching id — but before this fix, the only strong `Handle<CropDef>` in the whole app was the one inside `PlantedCrop`, and both `Harvest` and `Clear` remove that component, dropping the handle. Bevy's asset server unloads an asset once its last strong handle drops, so by the time a harvested lot reached the sell flow, its `CropDef` could already be gone from `Assets<CropDef>` — sell silently failed (lots preserved, per `sell.rs`'s existing "don't destroy inventory" guard, but nothing was creditable). `CropRoster` incidentally fixes this too: it holds one strong handle per discovered crop for the whole app lifetime, independent of what's planted/harvested, so `Assets<CropDef>` never empties out mid-session.
 
 `CropRoster` also runs light post-load validation (`validate_crop_defs`, reacting to `AssetEvent<CropDef>`) — sanity checks like `min_temp <= max_temp`, `ideal_*_range` falling inside the absolute range, and `quality_thresholds` ordering (`premium < good < lethal`), each logged as a `warn!` rather than rejecting the crop outright. This satisfies "warn if a crop JSON is missing/wrong" without making an in-progress, slightly-malformed crop file un-loadable while someone's actively editing it.
+
+---
+
+## 3.7 Save/Load (Phase 7)
+
+`save::SavePlugin` adds three events (`SaveRequested`, `LoadRequested`, `DeleteSaveRequested { name }`) and three `Update`-scheduled systems reacting to them — not run every frame, only on request. `ui::panels::save_load_panel` is the sole UI entry point: a floating egui window (not docked alongside the other four panels, so it doesn't compete for their space) with a name field + Save button, and a live-scanned list of `save/*.json` files each with Load/Delete buttons.
+
+**Load is a full farm rebuild, not a partial patch.** `load_game` despawns every current tile entity (`farm::despawn_all_tiles`), overwrites `FarmConfig` with the save's, respawns the grid at that size (`farm::spawn_tile_grid` — factored out of `farm::spawn_tiles` in this phase specifically so Startup and a mid-session load share the same grid-construction code rather than two copies of it), then walks the save's tile list re-inserting `SoilState` and, where present, `PlantedCrop`. This is what makes loading a save with a *different* farm size than whatever's currently running work correctly, rather than only supporting same-size loads.
+
+**Crop re-resolution:** neither `PlantedCrop.def` (`Handle<CropDef>`) nor `PendingAction.tile`/`.crop_to_plant` (`Entity`, `Handle<CropDef>`) survive serialization — see §2.8's updated notes for the mirror-struct pattern (`SavedCrop`, `SavedAction`) that stores plain ids/coordinates instead and re-resolves them via `CropRoster`/the freshly-rebuilt `TileMap` on load, tile-by-tile and action-by-action, warning and skipping (not failing the whole load) on anything that no longer resolves.
+
+**A save file is a point-in-time snapshot of *state*, not of *scheduling intent*.** Time control mode is explicitly excluded: `TimeControl`/`TimeMode` aren't part of `SaveGame` at all, and `load_game` unconditionally sets `TimeControl.mode = TimeMode::Paused` after loading, regardless of what mode was active when the save was made. This was a late addition once `ActionQueue` persistence was decided — a loaded save resuming with a Timer already counting down felt like the kind of surprise a save/load feature shouldn't introduce.
 
 ---
 
