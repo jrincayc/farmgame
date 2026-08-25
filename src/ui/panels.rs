@@ -84,6 +84,7 @@ pub fn top_bar(
     mut contexts: EguiContexts,
     mut theme: ResMut<UiTheme>,
     calendar: Res<Calendar>,
+    weather: Res<WeatherToday>,
     mut control: ResMut<TimeControl>,
     mut step_requests: EventWriter<StepDayRequested>,
     mut camera_state: ResMut<CameraState>,
@@ -100,6 +101,22 @@ pub fn top_bar(
                 calendar.current_day,
                 season_label(calendar.current_day, calendar.year_length)
             ));
+
+            ui.separator();
+
+            // Phase 8 addition: today's weather was previously only
+            // visible via console info!() logs from the old dev-controls
+            // path - a real gap against Pillar 2 ("player agency
+            // through information," requirements §2), since watering
+            // decisions depend on knowing whether it already rained.
+            if weather.rainfall > 0.0 {
+                ui.label(format!("Rain: {:.2}", weather.rainfall));
+            } else {
+                ui.label("Dry");
+            }
+            if weather.is_frost {
+                ui.colored_label(egui::Color32::LIGHT_BLUE, "Frost");
+            }
 
             ui.separator();
 
