@@ -109,14 +109,23 @@ pub fn top_bar(
             // path - a real gap against Pillar 2 ("player agency
             // through information," requirements §2), since watering
             // decisions depend on knowing whether it already rained.
-            if weather.rainfall > 0.0 {
-                ui.label(format!("Rain: {:.2}", weather.rainfall));
+            //
+            // Fixed-width slots (add_sized, not label) so "Dry" vs
+            // "Rain: 0.62" vs a frost callout don't change the row's
+            // total width and shove Step/Pause/etc. sideways under the
+            // cursor - reported as a real usability problem, not just
+            // cosmetic, since it made mis-clicks likely right after a
+            // weather change.
+            let rain_text = if weather.rainfall > 0.0 {
+                format!("Rain: {:.2}", weather.rainfall)
             } else {
-                ui.label("Dry");
-            }
-            if weather.is_frost {
-                ui.colored_label(egui::Color32::LIGHT_BLUE, "Frost");
-            }
+                "Dry".to_string()
+            };
+            ui.add_sized([70.0, ui.spacing().interact_size.y], egui::Label::new(rain_text));
+
+            let frost_text = egui::RichText::new(if weather.is_frost { "Frost" } else { "" })
+                .color(egui::Color32::LIGHT_BLUE);
+            ui.add_sized([45.0, ui.spacing().interact_size.y], egui::Label::new(frost_text));
 
             ui.separator();
 
