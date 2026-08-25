@@ -717,6 +717,68 @@ Two bugs found during Phase 6 playtesting, both closed together:
 
 ---
 
+## 3.8 Stress Diagnostics & Harvest Readiness (Phase 8, first polish batch)
+
+Playtesting turned up a real "player agency through information" gap
+(§2 pillar 2): the tile inspector showed `cumulative_stress`/
+`worst_single_day_stress` as raw numbers, with no way to tell *why* a
+crop was stressed — too hot, too cold, too wet, too dry, starved soil,
+or some combination — or which direction to correct. Separately, the
+inspector gave no direct signal for harvest readiness; the player had
+to compare `days_in_stage` against the stage's `duration_days` by hand.
+
+**Design constraint (explicitly requested):** this must not duplicate
+the stress-comparison logic that already lives in `growth::tick_growth`
+— one function, called by both the simulation and the display, DRY.
+
+**Implementation:** `crop_def::compute_daily_stress(def, temp, is_frost,
+moisture, fertility, overripe_days) -> StressBreakdown` is now the
+single place that decides what counts as stress. It returns not just
+the stress values but a `RangeStatus` (`BelowMin` / `AboveMax` /
+`BelowIdeal` / `AboveIdeal` / `Ideal`) per temp/moisture axis, so a
+caller can render "too cold" vs "a bit cold" vs "ideal" without
+re-deriving the comparison. `growth::tick_growth` calls it and sums
+`.total` into the accumulators exactly as before (the stress *values*
+are unchanged — this was a refactor of where the logic lives, not a
+rebalance). `ui::panels::tile_inspector_panel` calls the exact same
+function, purely for display, passing in today's actual weather/soil
+state (via `Region`/`Calendar`/`WeatherToday`/`SoilState`, all of which
+it already has access to or can trivially take as system params).
+
+`overripe_days` — needed by `compute_daily_stress` but dependent on
+`PlantedCrop`'s stage/days-in-stage state, which `crop_def.rs`
+deliberately doesn't reference — is factored into `growth::overripe_days
+(crop, def) -> u32`, callable from both `tick_growth` and the inspector.
+Two related helpers went in alongside it, closing the harvest-readiness
+gap the same way: `growth::is_mature(crop, def) -> bool` (previously
+inlined once, in `queue::resolve_action`'s `Harvest` handler — now
+shared with the inspector) and `growth::days_until_mature(crop, def)
+-> Option<u32>` (new — walks the remaining growth stages to report a
+countdown when not yet mature).
+
+The inspector now shows, per selected planted tile: harvest readiness
+("Ready to harvest!" or "N day(s) until mature"), then today's
+temperature/moisture/fertility each with an ideal-range comparison and
+a plain-language status, a frost callout when relevant, an overripe
+callout when relevant, and today's total stress — in addition to the
+existing cumulative/worst-day/quality figures. See `ui::panels`'
+`temp_status_label`/`moisture_status_label` for the `RangeStatus`-to-
+wording mapping (display-only, doesn't affect simulation).
+
+## 3.9 Toggleable Save/Load Window (Phase 8)
+
+The save/load window (§3.7) was always open — a floating egui window
+with `default_open(true)` and nothing to dismiss it, which sat on
+screen for the whole session and got in the way during normal play.
+Closed by adding `ui::SaveLoadWindowOpen(bool)` (default `false`),
+toggled by a new "Save / Load" button in the top bar
+(`panels::top_bar`). `save_load_panel` now passes `&mut open.0` to
+`egui::Window::open(...)`, which gives the window egui's own close (×)
+button wired to the same resource — so either the top-bar toggle or the
+window's own chrome closes it, no separate plumbing needed for the two
+paths. Not persisted in `save::SaveGame` — whether this particular
+window happens to be open isn't game state.
+
 ## 4. What's Deliberately Deferred (per stretch goals)
 
 - **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.

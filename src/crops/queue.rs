@@ -15,7 +15,7 @@ use crate::time::{Calendar, DayAdvanced};
 
 use super::crop_def::{quality_grade, yield_amount, CropDef};
 use super::equipment::Equipment;
-use super::growth::PlantedCrop;
+use super::growth::{is_mature, PlantedCrop};
 use crate::economy::{Inventory, Wallet};
 
 /// Modern farm equipment categories (requirements §4.6a) - one bucket of
@@ -217,10 +217,10 @@ fn resolve_action(
                 warn!("crop def asset not loaded yet, dropping queued Harvest action");
                 return;
             };
-            let is_mature = !def.growth_stages.is_empty()
-                && crop.current_stage == def.growth_stages.len() - 1
-                && crop.days_in_stage >= def.growth_stages[crop.current_stage].duration_days;
-            if !is_mature {
+            // Phase 8: shared with the tile inspector's harvest-
+            // readiness display via growth::is_mature, rather than each
+            // having its own copy of this check.
+            if !is_mature(crop, def) {
                 warn!("crop not yet mature, dropping queued Harvest action");
                 return;
             }

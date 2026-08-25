@@ -118,10 +118,28 @@ This is more setup than a flat season enum, but it's what actually earns "data-d
 
 **Stretch (post-MVP):** a futures market and genuinely variable/fluctuating sell prices (supply-and-demand style, similar to Sim Farm's economic layer) — see §7.
 
+### 4.3b Stress Diagnostics (Phase 8, first polish pass)
+
+Playtesting surfaced a gap in Pillar 2 ("player agency through
+information," §2): the tile inspector showed only the two running
+stress totals, with no way to tell *why* a crop was stressed or which
+direction (warmer/cooler, wetter/drier, more fertile) would help.
+**Resolved (Phase 8):** the tile inspector now shows, for the selected
+planted tile, today's temperature/moisture/fertility each compared
+against the crop's viable and ideal ranges with a plain-language status
+("too cold," "a bit dry," "ideal," etc.), a frost callout when
+relevant, an overripe-days callout when relevant, and harvest readiness
+("Ready to harvest!" / "N day(s) until mature"). See design doc §3.8 for
+the implementation, in particular the single shared
+`compute_daily_stress` function used by both the simulation and this
+display — a hard requirement going in, so the diagnostic view can never
+silently drift out of sync with what actually drives yield/quality.
+
 ### 4.6 Player & Farm Management
 - Player movement and interaction with tiles/tools
 - Inventory system
 - Save/load game state
+- **Resolved (Phase 8):** the save/load window used to be permanently open, which got in the way during normal play. It's now a toggleable floating window (a "Save / Load" button in the top bar), closable via that same button or the window's own close button.
 - **Resolved (Phase 7):** implemented as JSON snapshot files under a repo-root `save/` directory (easy to `.gitignore` as a whole, per your preference), one file per save, multiple named saves supported (not a single overwriting slot). Triggered entirely from a UI panel (name field + Save button, plus a live list of existing saves with Load/Delete) — no keyboard shortcut. Persists `Calendar`, `Wallet`, `Inventory`, `Equipment`, `Market`, `UiTheme`, `FarmConfig`, every tile's soil/planted-crop state, and — per an explicit decision to persist mid-plan state rather than requiring an empty queue at save time — the `ActionQueue` itself. `TimeControl`'s mode is *not* persisted; loading always resumes Paused. See design doc §2.8/§3.7 for the schema and re-resolution details.
 
 ### 4.6a Equipment & Action Queue

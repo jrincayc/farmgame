@@ -12,6 +12,14 @@
 //! not just the four starter crops, and (Phase 7) what `save::load_game`
 //! uses to re-resolve a saved crop-id string back into a live
 //! `Handle<CropDef>`.
+//!
+//! **Phase 8 addition:** `crop_def::compute_daily_stress` (plus
+//! `RangeStatus`/`StressBreakdown`) and `growth::{is_mature,
+//! days_until_mature, overripe_days}` are the shared, single-source-of-
+//! truth functions behind the tile inspector's new "why is this crop
+//! stressed" / "is it ready to harvest" display (see `ui::panels`) -
+//! `growth::tick_growth` and the inspector both call the same functions
+//! rather than each having their own copy of the comparison logic.
 
 pub mod crop_def;
 pub mod equipment;
@@ -20,9 +28,12 @@ pub mod queue;
 pub mod roster;
 
 #[allow(unused_imports)]
-pub use crop_def::{quality_grade, yield_amount, CropDef, CropDefLoader, GrowthStage, QualityGrade, QualityThresholds};
+pub use crop_def::{
+    compute_daily_stress, quality_grade, yield_amount, CropDef, CropDefLoader, GrowthStage,
+    QualityGrade, QualityThresholds, RangeStatus, StressBreakdown,
+};
 pub use equipment::Equipment;
-pub use growth::PlantedCrop;
+pub use growth::{days_until_mature, is_mature, overripe_days, PlantedCrop};
 pub use queue::{ActionKind, ActionQueue, NextActionId, PendingAction};
 pub use roster::{CropRoster, CropRosterEntry, CropRosterPlugin};
 

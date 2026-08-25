@@ -10,6 +10,14 @@
 //!   pan/zoom. Still explicitly *not* the real art pipeline.
 //! - `panels`: the egui panels themselves (time control, tile inspector,
 //!   action queue, economy/sell, camera zoom buttons, save/load).
+//!
+//! **Phase 8 addition:** the save/load window used to be permanently
+//! open (a floating egui window with no way to dismiss it - annoying
+//! since it sat on screen the whole session). It's now gated behind
+//! `SaveLoadWindowOpen`, toggled by a top-bar button, and egui's own
+//! `Window::open(&mut bool)` wires the window's built-in close button
+//! (×) straight back to that same resource - no separate close-button
+//! plumbing needed.
 
 pub mod panels;
 pub mod render;
@@ -45,6 +53,14 @@ impl Default for UiTheme {
     }
 }
 
+/// Whether the floating Save/Load window is currently shown. **Phase 8
+/// addition** - previously the window was always open with no toggle;
+/// this makes it dismissible, off by default, and reopenable from a top
+/// bar button (`panels::top_bar`). Deliberately not persisted across
+/// saves - whether the window happens to be open isn't game state.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct SaveLoadWindowOpen(pub bool);
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -54,6 +70,7 @@ impl Plugin for UiPlugin {
         })
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
+            .init_resource::<SaveLoadWindowOpen>()
             .add_systems(Startup, render::setup_camera)
             .add_systems(
                 Update,
@@ -73,11 +90,9 @@ impl Plugin for UiPlugin {
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
                     panels::economy_panel,
-                    // New (Phase 7): save/load panel. Ordered last -
-                    // doesn't read/write anything the other panels
-                    // depend on this frame, so position relative to them
-                    // doesn't matter functionally, just kept at the end
-                    // for readability (newest addition, listed last).
+                    // Save/load panel: now gated by SaveLoadWindowOpen
+                    // (Phase 8) rather than always-open (Phase 7). Kept
+                    // last for the same readability reason as before.
                     panels::save_load_panel,
                 )
                     .chain(),
