@@ -1,32 +1,35 @@
 //! UI (design doc §1's `ui/` module note: "reads from the others but
 //! doesn't own simulation state"; requirements §4.0's light/dark theme
-//! requirement; §4.6a's FIFO-only queue display) - **Phase 6**, plus a
-//! camera pan/zoom addition (see `render.rs`'s module doc) and (Phase 7)
-//! a save/load panel (see `panels::save_load_panel`).
+//! requirement; §4.6a's FIFO-only queue display) - Phase 6, plus a
+//! camera pan/zoom addition (see `render.rs`'s module doc), a save/load
+//! panel (Phase 7), and now real sprite-based tile rendering (see
+//! `sprites.rs`'s module doc) replacing the flat-colored-square
+//! placeholder from Phase 6.
 //!
-//! Two halves, split across submodules:
-//! - `render`: a placeholder top-down tile grid (flat colored squares +
-//!   a text-letter label per tile), click-to-select, and camera
-//!   pan/zoom. Still explicitly *not* the real art pipeline.
+//! Three submodules:
+//! - `sprites`: soil-texture and crop-growth-stage-art asset loading,
+//!   plus the moisture/fertility tint function. New this batch.
+//! - `render`: the tile grid (now sprite-layered, see its module doc),
+//!   click-to-select, and camera pan/zoom.
 //! - `panels`: the egui panels themselves (time control, tile inspector,
 //!   action queue, economy/sell, camera zoom buttons, save/load).
 //!
-//! **Phase 8 addition:** the save/load window used to be permanently
-//! open (a floating egui window with no way to dismiss it - annoying
-//! since it sat on screen the whole session). It's now gated behind
+//! **Phase 8 addition (unchanged this batch):** the save/load window
+//! used to be permanently open. It's now gated behind
 //! `SaveLoadWindowOpen`, toggled by a top-bar button, and egui's own
 //! `Window::open(&mut bool)` wires the window's built-in close button
-//! (×) straight back to that same resource - no separate close-button
-//! plumbing needed.
+//! (×) straight back to that same resource.
 
 pub mod panels;
 pub mod render;
+pub mod sprites;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContextPass, EguiPlugin};
 use serde::{Deserialize, Serialize};
 
 pub use render::CameraState;
+pub use sprites::{CropSpriteRoster, SoilSpriteRoster};
 
 /// Currently-clicked tile, read by every tile-targeted panel (inspector,
 /// action queue). `None` until the player clicks a tile for the first
@@ -53,8 +56,8 @@ impl Default for UiTheme {
     }
 }
 
-/// Whether the floating Save/Load window is currently shown. **Phase 8
-/// addition** - previously the window was always open with no toggle;
+/// Whether the floating Save/Load window is currently shown. Phase 8
+/// addition - previously the window was always open with no toggle;
 /// this makes it dismissible, off by default, and reopenable from a top
 /// bar button (`panels::top_bar`). Deliberately not persisted across
 /// saves - whether the window happens to be open isn't game state.
@@ -71,10 +74,12 @@ impl Plugin for UiPlugin {
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
             .init_resource::<SaveLoadWindowOpen>()
-            .add_systems(Startup, render::setup_camera)
+            .init_resource::<CropSpriteRoster>()
+            .add_systems(Startup, (render::setup_camera, sprites::load_soil_sprites))
             .add_systems(
                 Update,
                 (
+                    sprites::load_crop_sprites,
                     render::camera_input_system,
                     render::camera_apply_system,
                     render::spawn_tile_visuals,
@@ -90,9 +95,9 @@ impl Plugin for UiPlugin {
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
                     panels::economy_panel,
-                    // Save/load panel: now gated by SaveLoadWindowOpen
-                    // (Phase 8) rather than always-open (Phase 7). Kept
-                    // last for the same readability reason as before.
+                    // Save/load panel: gated by SaveLoadWindowOpen
+                    // (Phase 8) rather than always-open. Kept last for
+                    // the same readability reason as before.
                     panels::save_load_panel,
                 )
                     .chain(),

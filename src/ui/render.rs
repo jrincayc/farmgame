@@ -1,28 +1,47 @@
-//! Placeholder tile rendering + click selection + camera pan/zoom.
+//! Tile rendering (sprite-layer version, replacing the flat-colored-
+//! square placeholder) + click selection + camera pan/zoom.
 //!
-//! **Pan/zoom note (overrides an earlier deferral):** the design doc
-//! (§3.5) and requirements doc (§10) originally deferred camera pan/zoom
-//! to a future rendering/art-pipeline phase, on the reasoning that
-//! building camera controls against placeholder squares would be
-//! throwaway work. In practice, a fixed camera on a farm of thousands of
-//! tiles made playtesting painful (easy to miss a tile entirely), so
-//! pan/zoom is being built now, against the placeholder rendering.
-//! Camera control logic operates on `Camera`/`Transform`/`Projection`,
-//! not on what's drawn, so it should mostly survive the later swap to
-//! real sprites intact - this isn't expected to be thrown away the way
-//! e.g. tile-visual code might be.
+//! **This batch's change (requirements §10's rendering/art-pipeline
+//! phase):** each tile entity now has three child sprites instead of
+//! one flat-colored square + text label:
+//!   - `SoilLayer` — textured by `SoilType`, tinted at runtime by
+//!     moisture/fertility (see `sprites::soil_tint`)
+//!   - `TilledOverlayLayer` — a furrow-line overlay, visibility toggled
+//!     by `soil.tilled` rather than baked into the soil texture
+//!   - `CropLayer` — textured by the planted crop's current growth-
+//!     stage name (or `"dead"`), hidden entirely when nothing's planted
+//! This is what "soil visuals are layered, not flat per-combination
+//! textures" (requirements §10) and "growth-stage art stays data-driven
+//! per crop" mean in code — see `sprites.rs` for the asset-loading half.
 //!
-//! Everything else in this module (flat colored `Sprite` squares, a
-//! `Text2d` letter label) is unchanged and still NOT the real art
-//! pipeline - see `ui/mod.rs`'s module doc.
+//! **Removed in this batch:** the old `tile_color`/`tile_letter`
+//! functions and the `TileLabel` text-child approach — sprites now
+//! carry that information visually, and the tile inspector panel
+//! already surfaces the same state (crop name/stage/dead) as text for
+//! anyone who wants it precisely, not just at-a-glance.
+//!
+//! **Compile-risk note:** `Sprite { image: Handle<Image>, .. }` as a
+//! settable field (rather than a separate `SpriteBundle`+image
+//! component) is matched from memory against Bevy 0.16's sprite API,
+//! consistent with how the rest of this file already builds `Sprite`
+//! via struct-update syntax. Also assuming `Visibility::Hidden`/
+//! `Visibility::Visible` are usable as a plain component insert/update
+//! (not requiring `InheritedVisibility` wiring) - flagging both since
+//! `cargo check` isn't run in this workflow.
+//!
+//! Camera pan/zoom logic below this point is **unchanged** from the
+//! previous batch - it operates on `Camera`/`Transform`/`Projection`,
+//! not on what's drawn, so it was expected to survive this swap intact
+//! and did.
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
 use crate::crops::{CropDef, PlantedCrop};
-use crate::farm::{FarmConfig, SoilState, SoilType, Tile, TileMap};
+use crate::farm::{FarmConfig, SoilState, Tile, TileMap};
 
+use super::sprites::{soil_tint, CropSpriteRoster, SoilSpriteRoster};
 use super::SelectedTile;
 
 /// World-space size of one tile's square, plus a small gap so tiles
@@ -304,119 +323,151 @@ fn tile_world_pos(coord: IVec2) -> Vec2 {
     Vec2::new(coord.x as f32 * TILE_STRIDE, coord.y as f32 * TILE_STRIDE)
 }
 
-/// Points from a tile entity to its child label entity, so
-/// `sync_tile_visuals` can update the label's `Text2d` without a
-/// separate lookup pass. Set once in `spawn_tile_visuals`.
+/// Marker for the soil-base child sprite of a tile.
 #[derive(Component)]
-pub struct TileLabel(pub Entity);
+pub struct SoilLayer;
+
+/// Marker for the tilled-furrow-overlay child sprite of a tile.
+#[derive(Component)]
+pub struct TilledOverlayLayer;
+
+/// Marker for the crop-art child sprite of a tile.
+#[derive(Component)]
+pub struct CropLayer;
+
+/// Points from a tile entity to its three visual-layer children, so
+/// `sync_tile_visuals` can update each without a separate parent/child
+/// lookup pass per layer. Set once in `spawn_tile_visuals`.
+#[derive(Component)]
+pub struct TileVisualLayers {
+    pub soil: Entity,
+    pub tilled: Entity,
+    pub crop: Entity,
+}
 
 /// Runs once per tile entity, the frame it's first seen (`Added<Tile>`).
-pub fn spawn_tile_visuals(mut commands: Commands, new_tiles: Query<(Entity, &Tile), Added<Tile>>) {
+/// Spawns the three sprite-layer children (soil / tilled overlay / crop
+/// art), stacked via z-offset in that order so crop art always draws on
+/// top of soil, and the tilled overlay sits between the two.
+pub fn spawn_tile_visuals(
+    mut commands: Commands,
+    new_tiles: Query<(Entity, &Tile), Added<Tile>>,
+    soil_sprites: Res<SoilSpriteRoster>,
+) {
     for (entity, tile) in &new_tiles {
         let pos = tile_world_pos(tile.coord);
-        commands.entity(entity).insert((
-            Sprite {
-                custom_size: Some(Vec2::splat(TILE_SIZE)),
-                ..default()
-            },
-            Transform::from_translation(pos.extend(0.0)),
-        ));
+        commands.entity(entity).insert(Transform::from_translation(pos.extend(0.0)));
 
-        let label_entity = commands
+        let soil_entity = commands
             .spawn((
-                Text2d::new(""),
-                TextFont {
-                    font_size: 8.0,
+                SoilLayer,
+                Sprite {
+                    custom_size: Some(Vec2::splat(TILE_SIZE)),
                     ..default()
                 },
-                TextColor(Color::BLACK),
-                Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+                Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
             ))
             .id();
-        commands.entity(entity).add_child(label_entity);
-        commands.entity(entity).insert(TileLabel(label_entity));
+
+        let tilled_entity = commands
+            .spawn((
+                TilledOverlayLayer,
+                Sprite {
+                    image: soil_sprites.tilled_overlay.clone(),
+                    custom_size: Some(Vec2::splat(TILE_SIZE)),
+                    ..default()
+                },
+                Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+
+        let crop_entity = commands
+            .spawn((
+                CropLayer,
+                Sprite {
+                    custom_size: Some(Vec2::splat(TILE_SIZE)),
+                    ..default()
+                },
+                Transform::from_translation(Vec3::new(0.0, 0.0, 2.0)),
+                Visibility::Hidden,
+            ))
+            .id();
+
+        commands.entity(entity).add_children(&[soil_entity, tilled_entity, crop_entity]);
+        commands.entity(entity).insert(TileVisualLayers {
+            soil: soil_entity,
+            tilled: tilled_entity,
+            crop: crop_entity,
+        });
     }
 }
 
-/// Refreshes every tile's color + label every frame. Unchanged from
-/// before this batch - see the original doc comment for why this is
-/// brute-force rather than change-detected.
+/// Refreshes every tile's three visual layers every frame - brute-force
+/// (recomputes and reassigns even when nothing changed) rather than
+/// change-detected, same tradeoff the old flat-color version made:
+/// simplicity over the added complexity of tracking exactly which field
+/// changed, at a tile count where this hasn't been a measured problem.
 pub fn sync_tile_visuals(
-    mut tiles: Query<(&SoilState, Option<&PlantedCrop>, &TileLabel, &mut Sprite)>,
-    mut texts: Query<&mut Text2d>,
+    tiles: Query<(&SoilState, Option<&PlantedCrop>, &TileVisualLayers)>,
+    mut sprites: Query<&mut Sprite>,
+    mut visibilities: Query<&mut Visibility>,
+    soil_sprites: Res<SoilSpriteRoster>,
+    crop_sprites: Res<CropSpriteRoster>,
     crop_defs: Res<Assets<CropDef>>,
 ) {
-    for (soil, planted, label, mut sprite) in &mut tiles {
-        let color = tile_color(soil, planted);
-        if sprite.color != color {
-            sprite.color = color;
+    for (soil, planted, layers) in &tiles {
+        // --- Soil base: texture by SoilType, tinted by moisture/fertility ---
+        if let Ok(mut sprite) = sprites.get_mut(layers.soil) {
+            if let Some(handle) = soil_sprites.by_type.get(&soil.soil_type) {
+                if sprite.image != *handle {
+                    sprite.image = handle.clone();
+                }
+            }
+            sprite.color = soil_tint(soil.fertility, soil.moisture);
         }
 
-        let letter = tile_letter(soil, planted, &crop_defs);
-        if let Ok(mut text) = texts.get_mut(label.0) {
-            if text.0 != letter {
-                text.0 = letter.to_string();
+        // --- Tilled overlay: visibility only, image is set once at spawn ---
+        if let Ok(mut vis) = visibilities.get_mut(layers.tilled) {
+            *vis = if soil.tilled { Visibility::Visible } else { Visibility::Hidden };
+        }
+
+        // --- Crop art: dead / current-stage-name / hidden ---
+        let mut crop_visual: Option<Handle<Image>> = None;
+        if let Some(crop) = planted {
+            if let Some(def) = crop_defs.get(&crop.def) {
+                let stage_key = if crop.dead {
+                    Some("dead".to_string())
+                } else {
+                    def.growth_stages.get(crop.current_stage).map(|s| s.name.clone())
+                };
+                if let Some(key) = stage_key {
+                    crop_visual = crop_sprites.get(&def.id, &key).cloned();
+                }
             }
         }
-    }
-}
 
-fn tile_color(soil: &SoilState, planted: Option<&PlantedCrop>) -> Color {
-    if let Some(crop) = planted {
-        if crop.dead {
-            return Color::srgb(0.25, 0.05, 0.05);
+        if let Ok(mut sprite) = sprites.get_mut(layers.crop) {
+            if let Some(handle) = &crop_visual {
+                if sprite.image != *handle {
+                    sprite.image = handle.clone();
+                }
+            }
+        }
+        if let Ok(mut vis) = visibilities.get_mut(layers.crop) {
+            *vis = if crop_visual.is_some() { Visibility::Visible } else { Visibility::Hidden };
         }
     }
-
-    let base = match soil.soil_type {
-        SoilType::Sandy => Color::srgb(0.82, 0.71, 0.45),
-        SoilType::Loamy => Color::srgb(0.42, 0.28, 0.16),
-        SoilType::Clay => Color::srgb(0.55, 0.35, 0.30),
-    };
-
-    if soil.tilled {
-        let srgba = base.to_srgba();
-        Color::srgb(srgba.red * 0.75, srgba.green * 0.75, srgba.blue * 0.75)
-    } else {
-        base
-    }
-}
-
-fn tile_letter(soil: &SoilState, planted: Option<&PlantedCrop>, crop_defs: &Assets<CropDef>) -> String {
-    if let Some(crop) = planted {
-        if crop.dead {
-            return "X".to_string();
-        }
-        return match crop_defs.get(&crop.def) {
-            Some(def) => crop_initial(&def.id),
-            None => "?".to_string(),
-        };
-    }
-
-    if soil.tilled {
-        ".".to_string()
-    } else {
-        String::new()
-    }
-}
-
-fn crop_initial(crop_id: &str) -> String {
-    crop_id
-        .chars()
-        .next()
-        .map(|c| c.to_ascii_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string())
 }
 
 /// Click-to-select (plain left click, no modifier). Skips the click if
 /// egui wants pointer input that frame, same as before.
 ///
-/// **New in this batch:** also skips if Ctrl/Cmd is held, since that
-/// combination is now claimed by `camera_input_system` for drag-panning
-/// - without this, a modifier+click-without-moving would both pan
-/// (by zero) and select a tile, which is a confusing double-purpose for
-/// the same click. A plain, un-modified left click still selects a
-/// tile exactly as before.
+/// Also skips if Ctrl/Cmd is held, since that combination is claimed by
+/// `camera_input_system` for drag-panning - without this, a
+/// modifier+click-without-moving would both pan (by zero) and select a
+/// tile, a confusing double-purpose for the same click. A plain,
+/// un-modified left click still selects a tile exactly as before.
 pub fn tile_click_system(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
