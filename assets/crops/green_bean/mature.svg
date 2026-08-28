@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+
+<path d="M 64 110 Q 42 90 60 70 Q 82 50 62 30 Q 46 16 60 6" stroke="#3a6b1f" stroke-width="3" fill="none"/>
+<g transform="translate(46,88) rotate(-50)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#4f9c30" stroke="#1f3d14" stroke-width="1.5"/></g><g transform="translate(78,74) rotate(45)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#4f9c30" stroke="#1f3d14" stroke-width="1.5"/></g><g transform="translate(52,54) rotate(-35)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#4f9c30" stroke="#1f3d14" stroke-width="1.5"/></g><g transform="translate(74,38) rotate(35)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#4f9c30" stroke="#1f3d14" stroke-width="1.5"/></g><g transform="translate(50,18) rotate(-40)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#4f9c30" stroke="#1f3d14" stroke-width="1.5"/></g>
+<path d="M 58 66 Q 63 74 58 82 Q 53 74 58 66 Z" fill="#3f8a2a" stroke="#1f4a14" stroke-width="1"/><path d="M 80 58 Q 84 66 80 74 Q 76 66 80 58 Z" fill="#3f8a2a" stroke="#1f4a14" stroke-width="1"/><path d="M 50 40 Q 55 48 50 56 Q 45 48 50 40 Z" fill="#3f8a2a" stroke="#1f4a14" stroke-width="1"/><path d="M 70 26 Q 74 34 70 42 Q 66 34 70 26 Z" fill="#3f8a2a" stroke="#1f4a14" stroke-width="1"/>
+
+</svg>

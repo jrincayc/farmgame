@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+
+<line x1="64" y1="96" x2="64" y2="76" stroke="#7a6a4c" stroke-width="3" stroke-linecap="round"/>
+<g transform="translate(64,76) rotate(-25)"><path d="M 0 0 Q 3.5 -11.0 0 -22 Q -3.5 -11.0 0 0 Z" fill="#8a7a58" stroke="#4a3f2a" stroke-width="1.5"/></g>
+<g transform="translate(64,76) rotate(5)"><path d="M 0 0 Q 3.5 -11.0 0 -22 Q -3.5 -11.0 0 0 Z" fill="#7a6a4c" stroke="#4a3f2a" stroke-width="1.5"/></g>
+<g transform="translate(64,76) rotate(30)"><path d="M 0 0 Q 3.5 -11.0 0 -22 Q -3.5 -11.0 0 0 Z" fill="#8a7a58" stroke="#4a3f2a" stroke-width="1.5"/></g>
+
+</svg>

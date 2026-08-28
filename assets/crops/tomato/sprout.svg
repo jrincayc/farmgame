@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+
+<line x1="64" y1="96" x2="64" y2="74" stroke="#3a6b1f" stroke-width="3" stroke-linecap="round"/>
+<g transform="translate(64,74) rotate(-35)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#5fae3a" stroke="#1f3d14" stroke-width="1.5"/></g>
+<g transform="translate(64,74) rotate(35)"><path d="M 0 0 Q 7.0 -11.0 0 -22 Q -7.0 -11.0 0 0 Z" fill="#5fae3a" stroke="#1f3d14" stroke-width="1.5"/></g>
+
+</svg>
