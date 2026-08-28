@@ -200,6 +200,8 @@ pub fn camera_input_system(
         return;
     };
 
+    let mut zoom_factor = state.zoom_factor;
+
     // --- Zoom: scroll wheel ---
     // Skipped while egui wants pointer input (e.g. scrolling inside a
     // side panel) so panel scrolling and world zoom don't fight over
@@ -209,6 +211,7 @@ pub fn camera_input_system(
         if scroll_delta != 0.0 {
             let factor = SCROLL_ZOOM_STEP.powf(scroll_delta);
             state.zoom_factor = (state.zoom_factor * factor).clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+            zoom_factor = state.zoom_factor;
         }
     } else {
         scroll_events.clear();
@@ -230,7 +233,7 @@ pub fn camera_input_system(
         dir.y -= 1.0;
     }
     if dir != Vec2::ZERO {
-        state.center += dir.normalize() * KEYBOARD_PAN_SPEED * time.delta_secs();
+        state.center += dir.normalize() * KEYBOARD_PAN_SPEED * time.delta_secs() / zoom_factor;
     }
 
     // --- Pan: middle-click drag, or left-click + Ctrl/Cmd drag ---
