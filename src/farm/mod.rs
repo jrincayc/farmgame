@@ -106,10 +106,12 @@ impl SoilType {
 const FALLOW_FERTILITY_BASELINE: f32 = 0.6;
 
 /// Fraction of a day's rolled rainfall that actually reaches soil
-/// moisture (the rest is runoff/etc.), and how much moisture
-/// evaporates on a dry day regardless of rainfall. Both placeholders
-/// (design doc §5) — real numbers are a playtesting question, same as
-/// the fertility regen rates above.
+/// moisture at *zero* current moisture (the rest is runoff/etc.) - see
+/// the Phase 8 softening note on `degrade_soil` below for how this
+/// scales down as the tile gets wetter. How much moisture evaporates on
+/// a dry day, regardless of rainfall. Both placeholders (design doc §5)
+/// — real numbers are a playtesting question, same as the fertility
+/// regen rates above.
 const RAINFALL_TO_MOISTURE: f32 = 0.8;
 const DAILY_EVAPORATION: f32 = 0.03;
 
@@ -242,18 +244,26 @@ fn starting_soil_type(coord: IVec2) -> SoilType {
 /// doc's own field comment on `fertility_impact_per_day` says "positive
 /// drains soil, negative (legumes etc.) replenishes it" — but §2.3a's
 /// `degrade_soil` pseudocode *added* `fertility_impact_per_day`
-/// directly to `soil.fertility` with no negation. Adding a positive
-/// number increases fertility, which is the opposite of "draining."
-/// Following that pseudocode literally would have made every heavy
-/// feeder (tomato, wheat, carrot — all positive values) replenish the
-/// soil, and the one legume in the starter roster (negative value,
-/// meant to demonstrate rotation via nitrogen-fixing) would have
-/// drained it — backwards on both counts, and it would have quietly
-/// undermined the entire "crop rotation is emergent from these values"
-/// pitch (requirements §4.2). Fixed here by negating: `delta =
-/// -fertility_impact_per_day`. The design doc's pseudocode is corrected
-/// to match, with a note in place, same pattern as the earlier
-/// flat-delta fallow-drift bug.
+/// directly to `soil.fertility` with no negation. Fixed here by
+/// negating: `delta = -fertility_impact_per_day`.
+///
+/// **Phase 8: rainfall's moisture contribution is now softened,
+/// asymptotic toward saturation rather than a flat additive term.**
+/// Playtesting turned up moisture whiplash - queuing a Water action the
+/// same day it rained could stack two flat additions and blow straight
+/// past `max_moisture` into an over-watered failure state, with no way
+/// for the player to have anticipated it. Real soil absorbs less as it
+/// gets wetter (the rest runs off), so `rain_contribution` now scales by
+/// `(1.0 - soil.moisture)` - the wetter the tile already is, the less a
+/// given day's rain adds. `RAINFALL_TO_MOISTURE` remains the rate at
+/// *zero* moisture; it decays smoothly from there rather than being a
+/// flat rate that only stops via the post-hoc `.clamp(0.0, 1.0)`.
+/// Evaporation is deliberately left as a flat subtraction — drying out
+/// wasn't the thing that needed softening, and keeping it flat is what
+/// lets moisture actually recover instead of asymptotically clinging
+/// just under the ceiling forever. `crops::queue::resolve_action`'s
+/// `ActionKind::Water` handler applies the same `(1.0 - moisture)`
+/// softening to the watering action itself, for the same reason.
 ///
 /// If more than one `DayAdvanced` fires in the same frame (the timer's
 /// stutter-catchup case — see time module), this applies once per
@@ -286,7 +296,10 @@ fn degrade_soil(
             };
             soil.fertility = (soil.fertility + fertility_delta).clamp(0.0, 1.0);
 
-            let moisture_delta = weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION;
+            // Phase 8: softened - see this function's doc comment.
+            let rain_contribution =
+                weather.rainfall * RAINFALL_TO_MOISTURE * (1.0 - soil.moisture);
+            let moisture_delta = rain_contribution - DAILY_EVAPORATION;
             soil.moisture = (soil.moisture + moisture_delta).clamp(0.0, 1.0);
         }
     }
@@ -471,6 +484,40 @@ mod tests {
         assert!(
             types.len() > 1,
             "expected varied starting soil types across a small farm, got {types:?}"
+        );
+    }
+
+    /// **Phase 8 regression test:** the softened rain-absorption curve
+    /// should mean a single day of rainfall on already-near-max
+    /// moisture adds noticeably less than the old flat
+    /// `RAINFALL_TO_MOISTURE` rate would have - guards against
+    /// accidentally reverting to the flat additive formula.
+    #[test]
+    fn rain_contribution_shrinks_as_moisture_approaches_saturation() {
+        let mut app = test_app(FarmConfig {
+            width: 1,
+            height: 1,
+        });
+        app.update();
+
+        {
+            let mut query = app.world_mut().query::<&mut SoilState>();
+            for mut soil in query.iter_mut(app.world_mut()) {
+                soil.moisture = 0.95;
+            }
+        }
+        let before = all_soil(&mut app)[0].moisture;
+
+        app.world_mut().send_event(StepDayRequested);
+        app.update();
+
+        let after = all_soil(&mut app)[0].moisture;
+        // At 95% moisture, even full rainfall (rainfall=1.0) should add
+        // at most RAINFALL_TO_MOISTURE * (1.0 - 0.95) = 0.04 before
+        // evaporation - nowhere near the old flat-rate jump.
+        assert!(
+            after - before < 0.05,
+            "expected a small increase near saturation, before={before} after={after}"
         );
     }
 }

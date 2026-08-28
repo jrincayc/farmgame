@@ -29,6 +29,13 @@
 //! one tile or queued action is dropped with a `warn!` and the rest of
 //! the load proceeds normally - a corrupted reference doesn't fail the
 //! whole load.
+//!
+//! **Phase 8 addition:** `SavedAction` gained `water_intensity`
+//! (mirroring the same field on `PendingAction`, added for the new "½
+//! Water" button - see `crops::queue::PendingAction`'s doc comment).
+//! It's `#[serde(default)]`'d so a save file written before this field
+//! existed still loads cleanly, with every action defaulting to full
+//! (`1.0`) intensity rather than failing to parse.
 
 use std::fs;
 use std::path::PathBuf;
@@ -118,6 +125,13 @@ struct SavedTile {
     planted_crop: Option<SavedCrop>,
 }
 
+/// Default used by `SavedAction::water_intensity` when loading a save
+/// file written before that field existed - full-strength watering,
+/// matching the only behavior that existed at the time.
+fn default_water_intensity() -> f32 {
+    1.0
+}
+
 /// Mirror of `PendingAction`, substituting the tile's farm coordinate
 /// for the live `Entity` (re-resolved via the freshly-rebuilt `TileMap`
 /// on load) and a crop-id `String` for `Handle<CropDef>`, same reasoning
@@ -128,6 +142,12 @@ struct SavedAction {
     tile_coord: IVec2,
     kind: ActionKind,
     crop_to_plant: Option<String>,
+    /// **Phase 8 addition**, mirroring `PendingAction::water_intensity`.
+    /// `#[serde(default)]` so older save files (written before this
+    /// field existed) still deserialize, defaulting every action to
+    /// full intensity rather than failing to load.
+    #[serde(default = "default_water_intensity")]
+    water_intensity: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +263,7 @@ fn save_game(
                     tile_coord: tile.coord,
                     kind: action.kind,
                     crop_to_plant,
+                    water_intensity: action.water_intensity,
                 })
             })
             .collect();
@@ -416,6 +437,7 @@ fn load_game(
                 tile: tile_entity,
                 kind: saved_action.kind,
                 crop_to_plant,
+                water_intensity: saved_action.water_intensity,
             });
         }
         next_id.0 = save.next_action_id;

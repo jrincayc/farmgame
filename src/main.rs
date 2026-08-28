@@ -184,6 +184,10 @@ fn enqueue_action(
         tile,
         kind,
         crop_to_plant,
+        // Dev keyboard controls only ever queue full-strength watering
+        // - there's no key bound for "½ Water" (that's a Phase 8 UI-only
+        // addition, see ui::panels::action_queue_panel).
+        water_intensity: 1.0,
     });
 }
 

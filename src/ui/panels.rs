@@ -336,6 +336,23 @@ fn enqueue(
     kind: ActionKind,
     crop_to_plant: Option<Handle<CropDef>>,
 ) {
+    enqueue_with_intensity(queue, next_id, tile, kind, crop_to_plant, 1.0);
+}
+
+/// Phase 8 addition: lets a caller specify `water_intensity` (only
+/// meaningful for `ActionKind::Water` - see `PendingAction`'s doc
+/// comment). `enqueue` above is a thin wrapper defaulting to `1.0` so
+/// every existing call site (Till/Fertilize/Harvest/Clear/Plant/full
+/// Water) is unaffected; only the new "½ Water" button calls this
+/// directly.
+fn enqueue_with_intensity(
+    queue: &mut ActionQueue,
+    next_id: &mut NextActionId,
+    tile: Entity,
+    kind: ActionKind,
+    crop_to_plant: Option<Handle<CropDef>>,
+    water_intensity: f32,
+) {
     let id = next_id.0;
     next_id.0 += 1;
     queue.pending.push_back(PendingAction {
@@ -343,6 +360,7 @@ fn enqueue(
         tile,
         kind,
         crop_to_plant,
+        water_intensity,
     });
 }
 
@@ -373,6 +391,16 @@ pub fn action_queue_panel(
             if ui.button("Water").clicked() {
                 if let Some(t) = tile {
                     enqueue(&mut queue, &mut next_id, t, ActionKind::Water, None);
+                }
+            }
+            // Phase 8 addition: a lighter watering option, added after
+            // playtesting showed a full Water action stacking with the
+            // same day's rain could overshoot straight past
+            // max_moisture. Queues the same ActionKind::Water, just at
+            // half WATER_ACTION_AMOUNT - see PendingAction::water_intensity.
+            if ui.button("\u{00BD} Water").clicked() {
+                if let Some(t) = tile {
+                    enqueue_with_intensity(&mut queue, &mut next_id, t, ActionKind::Water, None, 0.5);
                 }
             }
             if ui.button("Fertilize").clicked() {
@@ -425,7 +453,14 @@ pub fn action_queue_panel(
                 ui.label("(empty)");
             }
             for action in &queue.pending {
-                ui.label(format!("#{} - {:?}", action.id, action.kind));
+                // Phase 8: distinguish a half-strength Water entry in
+                // the FIFO display, otherwise it's indistinguishable
+                // from a full Water action once queued.
+                if action.kind == ActionKind::Water && action.water_intensity < 1.0 {
+                    ui.label(format!("#{} - Water (\u{00BD})", action.id));
+                } else {
+                    ui.label(format!("#{} - {:?}", action.id, action.kind));
+                }
             }
         });
     });

@@ -55,6 +55,18 @@ pub struct PendingAction {
     pub kind: ActionKind,
     /// Only relevant for `ActionKind::Plant`.
     pub crop_to_plant: Option<Handle<CropDef>>,
+    /// **Phase 8 addition.** Multiplier on `WATER_ACTION_AMOUNT` for an
+    /// `ActionKind::Water` action; ignored for every other kind. `1.0`
+    /// is the original full-strength watering (still the default
+    /// button); `0.5` backs the new "½ Water" button, added after
+    /// playtesting turned up watering-into-already-wet-soil overshoot
+    /// (a queued Water landing the same day as rain, stacking past
+    /// `max_moisture`). Giving the player a lighter option is the
+    /// direct fix for that; see also the softened absorption curve in
+    /// `resolve_action`'s `Water` arm and `farm::degrade_soil`'s
+    /// rainfall term, which reduce (but don't eliminate) the same
+    /// overshoot even at full intensity.
+    pub water_intensity: f32,
 }
 
 #[derive(Resource, Default)]
@@ -162,7 +174,16 @@ fn resolve_action(
         }
 
         ActionKind::Water => {
-            soil.moisture = (soil.moisture + WATER_ACTION_AMOUNT).clamp(0.0, 1.0);
+            // Phase 8: softened from a flat additive bump to an
+            // asymptotic approach toward saturation (moisture == 1.0) -
+            // real soil absorbs less as it gets wetter, the rest is
+            // runoff. `water_intensity` (1.0 full / 0.5 "½ Water") lets
+            // the player choose a lighter dose on top of that; see
+            // PendingAction::water_intensity's doc comment for why this
+            // was added. Mirrors the same softening applied to rainfall
+            // in `farm::degrade_soil`.
+            let raw = WATER_ACTION_AMOUNT * action.water_intensity;
+            soil.moisture = (soil.moisture + raw * (1.0 - soil.moisture)).clamp(0.0, 1.0);
         }
 
         ActionKind::Fertilize => {
