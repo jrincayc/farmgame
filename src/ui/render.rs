@@ -92,7 +92,9 @@ pub struct PanelInsets {
 }
 
 pub fn record_panel_insets(mut contexts: EguiContexts, mut insets: ResMut<PanelInsets>) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     let (screen, free) = (ctx.screen_rect(), ctx.available_rect());
     *insets = PanelInsets {
         left: (free.min.x - screen.min.x).max(0.0),
@@ -215,7 +217,7 @@ pub fn camera_input_system(
     mut state: ResMut<CameraState>,
     time: Res<Time>,
 ) {
-    let egui_wants_pointer = contexts.ctx_mut().wants_pointer_input();
+    let egui_wants_pointer = contexts.try_ctx_mut().is_some_and(|c| c.wants_pointer_input());
     let Ok(window) = windows.single() else {
         scroll_events.clear();
         return;
@@ -563,7 +565,7 @@ pub fn tile_click_system(
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    if contexts.ctx_mut().wants_pointer_input() {
+    if contexts.try_ctx_mut().is_some_and(|c| c.wants_pointer_input()) {
         return;
     }
     let modifier_held = keys.pressed(KeyCode::ControlLeft)

@@ -104,7 +104,9 @@ pub fn top_bar(
     mut messages_open: ResMut<MessagesWindowOpen>,
     mut options_open: ResMut<OptionsWindowOpen>,
 ) {
-    let ctx = contexts.ctx_mut();
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     apply_theme(ctx, &theme);
 
     egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -238,7 +240,10 @@ pub fn tile_inspector_panel(
     tile_fields: Query<&TileField>,
     field_tiles: Query<(&SoilState, Option<&PlantedCrop>)>,
 ) {
-    egui::SidePanel::right("tile_inspector").show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::SidePanel::right("tile_inspector").show(ctx, |ui| {
         ui.heading("Selected Tile");
 
         let Some(coord) = selected.0 else {
@@ -428,7 +433,10 @@ pub fn action_queue_panel(
     mut water_depth: Local<Option<f32>>,
     mut field_target: ResMut<ActionTargetField>,
 ) {
-    egui::SidePanel::left("action_queue").show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::SidePanel::left("action_queue").show(ctx, |ui| {
         ui.heading("Actions");
 
         // Target: the selected tile, or a whole field.
@@ -564,7 +572,10 @@ pub fn fields_window(
         return;
     }
     let mut open = true;
-    egui::Window::new("Fields").open(&mut open).show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::Window::new("Fields").open(&mut open).show(ctx, |ui| {
         ui.checkbox(&mut brush.paint, "Paint mode (left-drag a rectangle on the map)");
         ui.radio_value(&mut brush.active, None, "Unassigned (eraser)");
 
@@ -622,7 +633,10 @@ pub fn economy_panel(
     inventory: Res<Inventory>,
     mut sell_requests: EventWriter<SellRequested>,
 ) {
-    egui::TopBottomPanel::bottom("economy_panel").show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::TopBottomPanel::bottom("economy_panel").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading(format!("Wallet: {}", wallet.money));
             ui.separator();
@@ -671,7 +685,10 @@ pub fn save_load_panel(
     if !open.0 {
         return;
     }
-    egui::Window::new("Save / Load").open(&mut open.0).show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::Window::new("Save / Load").open(&mut open.0).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Name:");
             ui.text_edit_singleline(&mut *save_name);
@@ -783,10 +800,13 @@ pub fn messages_window(
     }
     let mut window_open = true;
     let mut jump = None;
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
     egui::Window::new("Messages")
         .open(&mut window_open)
         .default_width(380.0)
-        .show(contexts.ctx_mut(), |ui| {
+        .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Clear all").clicked() {
                     log.entries.clear();
@@ -837,7 +857,10 @@ pub fn options_window(
         return;
     }
     let mut window_open = true;
-    egui::Window::new("Options").open(&mut window_open).show(contexts.ctx_mut(), |ui| {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    egui::Window::new("Options").open(&mut window_open).show(ctx, |ui| {
         ui.checkbox(&mut theme.dark, "Dark theme");
         ui.checkbox(&mut brush.show_boundaries, "Field outlines");
         ui.separator();
