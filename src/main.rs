@@ -14,6 +14,7 @@ mod crops;
 mod economy;
 mod farm;
 mod field;
+mod messages;
 mod save;
 mod sim_order;
 mod soil;
@@ -40,6 +41,7 @@ fn main() {
     .add_plugins(ClimatePlugin)
     .add_plugins(FarmPlugin)
     .add_plugins(field::FieldPlugin)
+    .add_plugins(messages::MessagesPlugin)
     .add_plugins(CropsPlugin)
     .add_plugins(EconomyPlugin)
     .add_plugins(save::SavePlugin)

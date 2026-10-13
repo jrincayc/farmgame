@@ -47,6 +47,7 @@ use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, Equipment, Next
 use crate::economy::{Inventory, Market, Wallet};
 use crate::farm::{self, FarmConfig, SoilState, Tile, TileMap};
 use crate::field::{FieldId, FieldIndex, FieldRegistry, TileField};
+use crate::messages::{GameOptions, MessageLog};
 use crate::soil::SoilRoster;
 use crate::time::{Calendar, TimeControl, TimeMode};
 use crate::ui::UiTheme;
@@ -237,6 +238,10 @@ struct SaveGame {
     inventory: Inventory,
     #[serde(default)]
     fields: FieldRegistry,
+    #[serde(default)]
+    messages: MessageLog,
+    #[serde(default)]
+    options: GameOptions,
     tiles: Vec<SavedTile>,
     action_queue: Vec<SavedAction>,
     next_action_id: u64,
@@ -290,6 +295,7 @@ fn save_game(
     tiles: Query<(&Tile, &SoilState, Option<&PlantedCrop>, &TileField)>,
     tile_lookup: Query<&Tile>,
     fields: Res<FieldRegistry>,
+    (message_log, options): (Res<MessageLog>, Res<GameOptions>),
     crop_defs: Res<Assets<CropDef>>,
     soils: Res<SoilRoster>,
 ) {
@@ -371,6 +377,8 @@ fn save_game(
             farm_config: config.clone(),
             inventory: inventory.clone(),
             fields: fields.clone(),
+            messages: message_log.clone(),
+            options: *options,
             tiles: saved_tiles,
             action_queue: saved_actions,
             next_action_id: next_id.0,
@@ -439,7 +447,12 @@ fn load_game(
     existing_tiles: Query<Entity, With<Tile>>,
     // Grouped: a system function takes at most 16 parameters.
     (roster, crop_defs, soils): (Res<CropRoster>, Res<Assets<CropDef>>, Res<SoilRoster>),
-    (mut field_registry, mut field_index): (ResMut<FieldRegistry>, ResMut<FieldIndex>),
+    (mut field_registry, mut field_index, mut message_log, mut options): (
+        ResMut<FieldRegistry>,
+        ResMut<FieldIndex>,
+        ResMut<MessageLog>,
+        ResMut<GameOptions>,
+    ),
 ) {
     for ev in events.read() {
         let Some(path) = sanitized_path(&ev.name) else {
@@ -472,6 +485,8 @@ fn load_game(
         // Fields: restore the registry, then (below) each tile's
         // assignment; the index is rebuilt from the tile values.
         *field_registry = save.fields.clone();
+        *message_log = save.messages.clone();
+        *options = save.options;
         let mut assignments: Vec<(IVec2, FieldId)> = Vec::new();
 
         // 3. Overwrite each tile's soil, and re-plant if the save had a

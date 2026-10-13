@@ -6,7 +6,11 @@
 use bevy::prelude::*;
 
 use crate::climate::{Region, WeatherToday};
-use crate::farm::SoilState;
+use std::collections::HashMap;
+
+use crate::farm::{SoilState, Tile};
+use crate::field::{FieldId, FieldRegistry, TileField};
+use crate::messages::{batch_text, GameMessage, MessageKind, Severity};
 use crate::soil::SoilRoster;
 use crate::sim_order::DayAdvanceOrder;
 use crate::time::{Calendar, DayAdvanced};
@@ -99,7 +103,8 @@ pub struct CropsGrowthPlugin;
 
 impl Plugin for CropsGrowthPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, tick_growth.in_set(DayAdvanceOrder::CropsGrowth));
+        app.add_event::<GameMessage>()
+            .add_systems(Update, tick_growth.in_set(DayAdvanceOrder::CropsGrowth));
     }
 }
 
@@ -124,14 +129,22 @@ fn tick_growth(
     weather: Res<WeatherToday>,
     soils: Res<SoilRoster>,
     crop_defs: Res<Assets<CropDef>>,
-    mut crops: Query<(&mut PlantedCrop, &SoilState)>,
+    mut crops: Query<(&Tile, &TileField, &mut PlantedCrop, &SoilState)>,
+    registry: Res<FieldRegistry>,
+    mut messages: EventWriter<GameMessage>,
 ) {
     let advanced_days: Vec<u32> = events.read().map(|e| e.new_day).collect();
     if advanced_days.is_empty() {
         return;
     }
 
-    for (mut crop, soil) in &mut crops {
+    // Batched per (day, field, crop[, cause]) so a whole field maturing or
+    // dying on one day is a single message.
+    type Key = (u32, Option<FieldId>, String);
+    let mut ready: HashMap<Key, Vec<IVec2>> = HashMap::new();
+    let mut died: HashMap<(Key, &'static str), Vec<IVec2>> = HashMap::new();
+
+    for (tile, tile_field, mut crop, soil) in &mut crops {
         if crop.dead {
             continue;
         }
@@ -160,6 +173,7 @@ fn tick_growth(
             // crop_def::compute_daily_stress, shared with the tile
             // inspector's display. overripe_days is computed here (it
             // needs crop's current stage/days-in-stage) and passed in.
+            let was_mature = is_mature(&crop, def);
             let overripe = overripe_days(&crop, def);
             let breakdown = super::crop_def::compute_daily_stress(
                 def,
@@ -177,6 +191,9 @@ fn tick_growth(
 
             if crop.worst_single_day_stress >= def.quality_thresholds.lethal_stress {
                 crop.dead = true;
+                died.entry(((day, tile_field.0, def.name.clone()), breakdown.dominant_cause()))
+                    .or_default()
+                    .push(tile.coord);
                 break;
             }
 
@@ -192,6 +209,39 @@ fn tick_growth(
                     crop.days_in_stage = 0;
                 }
             }
+            if !was_mature && is_mature(&crop, def) {
+                ready.entry((day, tile_field.0, def.name.clone())).or_default().push(tile.coord);
+            }
         }
+    }
+
+    let field_name = |id: Option<FieldId>| id.and_then(|id| registry.get(id)).map(|f| f.name.as_str());
+    let first = |mut tiles: Vec<IVec2>| {
+        tiles.sort_by_key(|c| (c.y, c.x));
+        (tiles.len(), tiles.first().copied())
+    };
+    for ((day, field, crop_name), tiles) in ready {
+        let (count, tile) = first(tiles);
+        messages.write(GameMessage {
+            day,
+            kind: MessageKind::ReadyToHarvest,
+            severity: Severity::Info,
+            text: batch_text(field_name(field), count, &crop_name, "ready to harvest"),
+            tile,
+            field,
+            key: None,
+        });
+    }
+    for (((day, field, crop_name), cause), tiles) in died {
+        let (count, tile) = first(tiles);
+        messages.write(GameMessage {
+            day,
+            kind: MessageKind::CropDied,
+            severity: Severity::Alert,
+            text: batch_text(field_name(field), count, &crop_name, &format!("died ({cause})")),
+            tile,
+            field,
+            key: None,
+        });
     }
 }

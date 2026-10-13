@@ -358,7 +358,7 @@ pub fn camera_apply_system(
     }
 }
 
-fn tile_world_pos(coord: IVec2) -> Vec2 {
+pub fn tile_world_pos(coord: IVec2) -> Vec2 {
     Vec2::new(coord.x as f32 * TILE_STRIDE, coord.y as f32 * TILE_STRIDE)
 }
 

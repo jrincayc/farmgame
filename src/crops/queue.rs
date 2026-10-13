@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::farm::{FarmConfig, SoilState, Tile, TileMap};
 use crate::field::{tractor_order, FieldId, FieldIndex, FieldRegistry};
+use crate::messages::{ClearMessageKey, GameMessage, MessageKind, Severity};
 use crate::sim_order::DayAdvanceOrder;
 use crate::soil::SoilRoster;
 use crate::time::{Calendar, DayAdvanced};
@@ -74,6 +75,9 @@ pub struct PendingAction {
     pub visited: HashSet<IVec2>,
     pub applied: u32,
     pub skipped: u32,
+    /// Whether a "waiting for funds" message is currently standing for
+    /// this action. Not saved; it is re-raised on the next blocked day.
+    pub waiting_funds: bool,
 }
 
 impl PendingAction {
@@ -93,21 +97,8 @@ impl PendingAction {
             visited: HashSet::new(),
             applied: 0,
             skipped: 0,
+            waiting_funds: false,
         }
-    }
-}
-
-/// Short-lived messages about queue events the player should see (for
-/// example an action dropped because its field was deleted).
-#[derive(Resource, Debug, Default)]
-pub struct ActionNotices(pub Vec<String>);
-
-impl ActionNotices {
-    fn push(&mut self, msg: String) {
-        warn!("{msg}");
-        self.0.push(msg);
-        let excess = self.0.len().saturating_sub(6);
-        self.0.drain(..excess);
     }
 }
 
@@ -129,7 +120,8 @@ pub struct CropsQueuePlugin;
 impl Plugin for CropsQueuePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActionQueue>()
-            .init_resource::<ActionNotices>()
+            .add_event::<GameMessage>()
+            .add_event::<ClearMessageKey>()
             .init_resource::<FieldRegistry>()
             .init_resource::<FieldIndex>()
             .init_resource::<NextActionId>()
@@ -158,7 +150,8 @@ fn process_action_queue(
     calendar: Res<Calendar>,
     mut commands: Commands,
     (registry, index, tile_map, config): (Res<FieldRegistry>, Res<FieldIndex>, Res<TileMap>, Res<FarmConfig>),
-    mut notices: ResMut<ActionNotices>,
+    mut messages: EventWriter<GameMessage>,
+    mut clears: EventWriter<ClearMessageKey>,
 ) {
     let day_count = events.read().count();
     if day_count == 0 {
@@ -173,31 +166,51 @@ fn process_action_queue(
             let cap = equipment.daily_capacity.get(&action.kind).copied().unwrap_or(0);
             let done = done_today.entry(action.kind).or_insert(0);
 
+            let funds_key = format!("funds:{}", action.id);
+            let day = calendar.current_day + 1;
+            let describe = |target: TileOrField| match target {
+                TileOrField::Tile(_) => "a tile".to_string(),
+                TileOrField::Field(id) => registry
+                    .get(id)
+                    .map_or_else(|| "a deleted field".to_string(), |f| f.name.clone()),
+            };
+            let drop_message = |reason: String| GameMessage {
+                day,
+                kind: MessageKind::ActionDropped,
+                severity: Severity::Warning,
+                text: reason,
+                tile: None,
+                field: None,
+                key: None,
+            };
+
             // The target's tiles right now, in the order they're worked.
             let coords: Vec<IVec2> = match action.target {
                 TileOrField::Tile(entity) => match tiles.get(entity) {
                     Ok((tile, _, _)) => vec![tile.coord],
                     Err(_) => {
-                        notices.push(format!("{:?} #{} dropped: its tile no longer exists", action.kind, action.id));
+                        messages.write(drop_message(format!(
+                            "{:?} #{} dropped: its tile no longer exists",
+                            action.kind, action.id
+                        )));
+                        clears.write(ClearMessageKey(funds_key));
                         continue;
                     }
                 },
                 TileOrField::Field(id) => {
-                    let Some(info) = registry.get(id) else {
-                        notices.push(format!(
-                            "{:?} #{} dropped: its field was deleted ({} of its tiles done)",
+                    if registry.get(id).is_none() {
+                        messages.write(drop_message(format!(
+                            "{:?} #{} dropped: its field was deleted ({} tiles done)",
                             action.kind, action.id, action.applied
-                        ));
+                        )));
+                        clears.write(ClearMessageKey(funds_key));
                         continue;
-                    };
-                    let order = tractor_order(index.tiles_of(id), &config);
-                    if order.is_empty() {
-                        notices.push(format!("{:?} #{}: field '{}' has no tiles", action.kind, action.id, info.name));
                     }
-                    order
+                    tractor_order(index.tiles_of(id), &config)
                 }
             };
 
+            let mut out_of_funds = false;
             for &coord in &coords {
                 if action.visited.contains(&coord) {
                     continue;
@@ -238,12 +251,67 @@ fn process_action_queue(
                     // equipment capacity.
                     Outcome::Skipped => action.skipped += 1,
                     // Every remaining tile costs the same, so stop for today.
-                    Outcome::OutOfFunds => break,
+                    Outcome::OutOfFunds => {
+                        out_of_funds = true;
+                        break;
+                    }
                 }
                 action.visited.insert(coord);
             }
 
-            if !coords.iter().all(|c| action.visited.contains(c)) {
+            let finished = coords.iter().all(|c| action.visited.contains(c));
+
+            // Standing "waiting for funds" message while blocked; cleared
+            // once the action can proceed or ends.
+            if out_of_funds {
+                let cost = action
+                    .crop_to_plant
+                    .as_ref()
+                    .and_then(|h| crop_defs.get(h))
+                    .map_or(0, |d| d.seed_cost);
+                let field = match action.target {
+                    TileOrField::Field(id) => Some(id),
+                    _ => None,
+                };
+                messages.write(GameMessage {
+                    day,
+                    kind: MessageKind::WaitingForFunds,
+                    severity: Severity::Warning,
+                    text: format!(
+                        "Planting on {} is waiting for funds: seeds cost {}, you have {}",
+                        describe(action.target),
+                        cost,
+                        wallet.money
+                    ),
+                    tile: coords.iter().copied().find(|c| !action.visited.contains(c)),
+                    field,
+                    key: Some(funds_key),
+                });
+                action.waiting_funds = true;
+            } else if action.waiting_funds {
+                clears.write(ClearMessageKey(funds_key));
+                action.waiting_funds = false;
+            }
+
+            if finished {
+                if let TileOrField::Field(id) = action.target {
+                    messages.write(GameMessage {
+                        day,
+                        kind: MessageKind::ActionDone,
+                        severity: if action.skipped > 0 { Severity::Warning } else { Severity::Info },
+                        text: format!(
+                            "{:?} on {} finished: {} applied, {} skipped",
+                            action.kind,
+                            describe(action.target),
+                            action.applied,
+                            action.skipped
+                        ),
+                        tile: coords.first().copied(),
+                        field: Some(id),
+                        key: None,
+                    });
+                }
+            } else {
                 still_pending.push_back(action);
             }
         }
@@ -396,6 +464,7 @@ mod tests {
         app.add_plugins(EconomyPlugin);
         app.add_plugins(FarmPlugin);
         app.add_plugins(FieldPlugin);
+        app.add_plugins(crate::messages::MessagesPlugin);
         crate::sim_order::configure(&mut app);
         app.insert_resource(FarmConfig { width: 32, height: 32, ..default() });
         app.update();
@@ -558,7 +627,9 @@ mod tests {
         app.update();
         step_day(&mut app);
         assert!(app.world().resource::<ActionQueue>().pending.is_empty());
-        assert_eq!(app.world().resource::<ActionNotices>().0.len(), 1);
+        let log = app.world().resource::<crate::messages::MessageLog>();
+        assert_eq!(log.entries.len(), 1);
+        assert_eq!(log.entries[0].kind, crate::messages::MessageKind::ActionDropped);
     }
 
     #[test]
@@ -619,5 +690,71 @@ mod tests {
         assert!(app.world().resource::<ActionQueue>().pending.is_empty());
         let planted = app.world_mut().query::<&PlantedCrop>().iter(app.world()).count();
         assert_eq!(planted, 3);
+    }
+
+    #[test]
+    fn waiting_for_funds_is_one_standing_message_cleared_when_resolved() {
+        use crate::messages::{MessageKind, MessageLog};
+        let (mut app, a) = test_app();
+        let handle = add_test_crop(&mut app, 15);
+        paint(&mut app, (0, 0), (2, 0), Some(a));
+        queue_action(&mut app, TileOrField::Field(a), ActionKind::Till, 0.0);
+        app.world_mut().resource_mut::<ActionQueue>().pending.push_back(PendingAction::new(
+            1,
+            TileOrField::Field(a),
+            ActionKind::Plant,
+            Some(handle),
+            0.0,
+        ));
+        app.world_mut().resource_mut::<Wallet>().money = 0;
+        for _ in 0..3 {
+            step_day(&mut app);
+        }
+        let waiting = |app: &App| {
+            app.world()
+                .resource::<MessageLog>()
+                .entries
+                .iter()
+                .filter(|m| m.kind == MessageKind::WaitingForFunds)
+                .count()
+        };
+        assert_eq!(waiting(&app), 1);
+
+        app.world_mut().resource_mut::<Wallet>().money = 100;
+        step_day(&mut app);
+        assert_eq!(waiting(&app), 0);
+    }
+
+    #[test]
+    fn a_field_maturing_is_one_message_and_can_auto_pause() {
+        use crate::messages::{GameOptions, MessageKind, MessageLog};
+        use crate::time::{TimeControl, TimeMode, TimerSpeed};
+        let (mut app, a) = test_app();
+        let handle = add_test_crop(&mut app, 1);
+        paint(&mut app, (0, 0), (2, 0), Some(a));
+        for x in 0..3 {
+            let e = app.world().resource::<TileMap>().tiles[&IVec2::new(x, 0)];
+            app.world_mut().entity_mut(e).insert(PlantedCrop {
+                def: handle.clone(),
+                planted_day: 0,
+                current_stage: 0,
+                days_in_stage: 4, // one day short of the 5-day stage
+                cumulative_stress: 0.0,
+                worst_single_day_stress: 0.0,
+                dead: false,
+            });
+        }
+        app.world_mut().resource_mut::<GameOptions>().auto_pause_on_ready = true;
+        app.world_mut().resource_mut::<TimeControl>().mode = TimeMode::Timer {
+            speed: TimerSpeed::Normal,
+            elapsed_ms: 0.0,
+        };
+        step_day(&mut app);
+
+        let log = app.world().resource::<MessageLog>();
+        let ready: Vec<_> = log.entries.iter().filter(|m| m.kind == MessageKind::ReadyToHarvest).collect();
+        assert_eq!(ready.len(), 1);
+        assert!(ready[0].text.contains("3 t ready to harvest"), "{}", ready[0].text);
+        assert!(matches!(app.world().resource::<TimeControl>().mode, TimeMode::Paused));
     }
 }

@@ -64,6 +64,13 @@ impl Default for UiTheme {
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct SaveLoadWindowOpen(pub bool);
 
+/// Whether the Messages / Options windows are shown. Not persisted.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct MessagesWindowOpen(pub bool);
+
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct OptionsWindowOpen(pub bool);
+
 /// Whether tiles are drawn as flat soil-type colours (design doc §6.7)
 /// instead of textured/tinted soil, so the player can see the soil layout
 /// at a glance. Not persisted.
@@ -81,6 +88,8 @@ impl Plugin for UiPlugin {
             .init_resource::<UiTheme>()
             .init_resource::<SaveLoadWindowOpen>()
             .init_resource::<ShowSoilOverlay>()
+            .init_resource::<MessagesWindowOpen>()
+            .init_resource::<OptionsWindowOpen>()
             .init_resource::<render::PanelInsets>()
             .init_resource::<CropSpriteRoster>()
             .add_systems(Startup, (render::setup_camera, render::configure_gizmos, sprites::load_soil_sprites))
@@ -104,6 +113,8 @@ impl Plugin for UiPlugin {
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
                     panels::fields_window,
+                    panels::messages_window,
+                    panels::options_window,
                     panels::economy_panel,
                     // Save/load panel: gated by SaveLoadWindowOpen
                     // (Phase 8) rather than always-open. Kept last for

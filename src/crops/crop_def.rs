@@ -222,6 +222,29 @@ pub struct StressBreakdown {
     pub total: f32,
 }
 
+impl StressBreakdown {
+    /// The biggest contributor to the day's stress, in words - used to say
+    /// why a crop died.
+    pub fn dominant_cause(&self) -> &'static str {
+        let temp = match self.temp_status {
+            RangeStatus::AboveMax | RangeStatus::AboveIdeal => "heat",
+            _ => "cold",
+        };
+        [
+            (self.frost_stress, "frost"),
+            (self.temp_stress, temp),
+            (self.drought_stress, "drought"),
+            (self.waterlog_stress, "waterlogging"),
+            (self.overripe_stress, "being left unharvested"),
+            (self.fertility_stress, "poor fertility"),
+        ]
+        .into_iter()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, cause)| cause)
+        .unwrap_or("stress")
+    }
+}
+
 /// The one function that computes a day's stress - called by both
 /// `growth::tick_growth` (which feeds `.total` into the accumulators)
 /// and `ui::panels::tile_inspector_panel` (which only reads the

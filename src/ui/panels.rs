@@ -17,7 +17,7 @@ use bevy_egui::{egui, EguiContexts};
 use crate::climate::{Region, WeatherToday};
 use crate::crops::{
     days_until_mature, is_mature, overripe_days, ActionKind, ActionQueue, CropDef, CropRoster,
-    NextActionId, PendingAction, RangeStatus, TileOrField, ActionNotices,
+    NextActionId, PendingAction, RangeStatus, TileOrField
 };
 use crate::field::{ActionTargetField, DeleteFieldRequested, FieldBrush, FieldId, FieldIndex, FieldRegistry, TileField};
 use crate::economy::{Inventory, SellRequested, Wallet};
@@ -25,8 +25,9 @@ use crate::farm::{FarmConfig, TileMap};
 use crate::save::{DeleteSaveRequested, LoadRequested, SaveRequested, SAVE_DIR};
 use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed};
 
-use super::render::{farm_world_center, BUTTON_ZOOM_STEP, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
-use super::{CameraState, SaveLoadWindowOpen, SelectedTile, ShowSoilOverlay, UiTheme};
+use super::render::{farm_world_center, tile_world_pos, BUTTON_ZOOM_STEP, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
+use super::{CameraState, MessagesWindowOpen, OptionsWindowOpen, SaveLoadWindowOpen, SelectedTile, ShowSoilOverlay, UiTheme};
+use crate::messages::{GameOptions, MessageLog, Severity};
 use crate::soil::{self, SoilRoster};
 use crate::farm::SoilState;
 use crate::crops::PlantedCrop;
@@ -89,7 +90,7 @@ fn time_mode_label(mode: &TimeMode) -> String {
 /// every frame (idempotent, cheap) rather than only on toggle.
 pub fn top_bar(
     mut contexts: EguiContexts,
-    mut theme: ResMut<UiTheme>,
+    theme: Res<UiTheme>,
     calendar: Res<Calendar>,
     weather: Res<WeatherToday>,
     mut control: ResMut<TimeControl>,
@@ -99,6 +100,9 @@ pub fn top_bar(
     mut save_load_open: ResMut<SaveLoadWindowOpen>,
     mut soil_overlay: ResMut<ShowSoilOverlay>,
     mut brush: ResMut<FieldBrush>,
+    log: Res<MessageLog>,
+    mut messages_open: ResMut<MessagesWindowOpen>,
+    mut options_open: ResMut<OptionsWindowOpen>,
 ) {
     let ctx = contexts.ctx_mut();
     apply_theme(ctx, &theme);
@@ -189,7 +193,6 @@ pub fn top_bar(
             }
 
             ui.checkbox(&mut soil_overlay.0, "Soil types");
-            ui.checkbox(&mut brush.show_boundaries, "Field outlines");
             if ui.button("Fields").clicked() {
                 brush.window_open = !brush.window_open;
                 if !brush.window_open {
@@ -197,10 +200,19 @@ pub fn top_bar(
                 }
             }
 
+            let unread = log.unread();
+            let label = if unread > 0 {
+                egui::RichText::new(format!("Messages ({unread})")).color(egui::Color32::from_rgb(220, 120, 0))
+            } else {
+                egui::RichText::new("Messages")
+            };
+            if ui.button(label).clicked() {
+                messages_open.0 = !messages_open.0;
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if theme.dark { "Light theme" } else { "Dark theme" };
-                if ui.button(label).clicked() {
-                    theme.dark = !theme.dark;
+                if ui.button("Options").clicked() {
+                    options_open.0 = !options_open.0;
                 }
             });
         });
@@ -412,7 +424,6 @@ pub fn action_queue_panel(
     mut next_id: ResMut<NextActionId>,
     registry: Res<FieldRegistry>,
     index: Res<FieldIndex>,
-    mut notices: ResMut<ActionNotices>,
     mut crop_choice: Local<usize>,
     mut water_depth: Local<Option<f32>>,
     mut field_target: ResMut<ActionTargetField>,
@@ -537,16 +548,6 @@ pub fn action_queue_panel(
                 }
             }
         });
-
-        if !notices.0.is_empty() {
-            ui.separator();
-            for n in &notices.0 {
-                ui.colored_label(egui::Color32::from_rgb(200, 120, 0), n);
-            }
-            if ui.small_button("Dismiss").clicked() {
-                notices.0.clear();
-            }
-        }
     });
 }
 
@@ -764,4 +765,85 @@ fn field_summary(
         min,
         max
     ));
+}
+
+/// Message log window. Clicking a message selects its tile / targets its
+/// field and moves the camera there.
+pub fn messages_window(
+    mut contexts: EguiContexts,
+    mut open: ResMut<MessagesWindowOpen>,
+    mut log: ResMut<MessageLog>,
+    registry: Res<FieldRegistry>,
+    mut selected: ResMut<SelectedTile>,
+    mut target_field: ResMut<ActionTargetField>,
+    mut camera: ResMut<CameraState>,
+) {
+    if !open.0 {
+        return;
+    }
+    let mut window_open = true;
+    let mut jump = None;
+    egui::Window::new("Messages")
+        .open(&mut window_open)
+        .default_width(380.0)
+        .show(contexts.ctx_mut(), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Clear all").clicked() {
+                    log.entries.clear();
+                }
+                ui.label(format!("{} messages", log.entries.len()));
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                if log.entries.is_empty() {
+                    ui.label("(no messages)");
+                }
+                for m in log.entries.iter().rev() {
+                    let color = match m.severity {
+                        Severity::Info => ui.visuals().text_color(),
+                        Severity::Warning => egui::Color32::from_rgb(200, 120, 0),
+                        Severity::Alert => egui::Color32::from_rgb(210, 40, 40),
+                    };
+                    let mut text = egui::RichText::new(format!("Day {}: {}", m.day, m.text)).color(color);
+                    if m.unread {
+                        text = text.strong();
+                    }
+                    if ui.selectable_label(false, text).clicked() {
+                        jump = Some((m.tile, m.field.filter(|id| registry.get(*id).is_some())));
+                    }
+                }
+            });
+        });
+    // Everything visible while the window is open counts as read.
+    log.mark_all_read();
+    if let Some((tile, field)) = jump {
+        if let Some(coord) = tile {
+            selected.0 = Some(coord);
+            camera.center = tile_world_pos(coord);
+        }
+        target_field.0 = field;
+    }
+    open.0 = window_open;
+}
+
+pub fn options_window(
+    mut contexts: EguiContexts,
+    mut open: ResMut<OptionsWindowOpen>,
+    mut theme: ResMut<UiTheme>,
+    mut options: ResMut<GameOptions>,
+    mut brush: ResMut<FieldBrush>,
+) {
+    if !open.0 {
+        return;
+    }
+    let mut window_open = true;
+    egui::Window::new("Options").open(&mut window_open).show(contexts.ctx_mut(), |ui| {
+        ui.checkbox(&mut theme.dark, "Dark theme");
+        ui.checkbox(&mut brush.show_boundaries, "Field outlines");
+        ui.separator();
+        ui.label("Auto-pause when:");
+        ui.checkbox(&mut options.auto_pause_on_ready, "crops become ready to harvest");
+        ui.checkbox(&mut options.auto_pause_on_death, "crops die");
+    });
+    open.0 = window_open;
 }
