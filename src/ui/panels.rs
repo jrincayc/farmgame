@@ -19,7 +19,7 @@ use crate::crops::{
     days_until_mature, is_mature, overripe_days, ActionKind, ActionQueue, CropDef, CropRoster,
     NextActionId, PendingAction, RangeStatus, TileOrField, ActionNotices,
 };
-use crate::field::{DeleteFieldRequested, FieldBrush, FieldId, FieldIndex, FieldRegistry, TileField};
+use crate::field::{ActionTargetField, DeleteFieldRequested, FieldBrush, FieldId, FieldIndex, FieldRegistry, TileField};
 use crate::economy::{Inventory, SellRequested, Wallet};
 use crate::farm::{FarmConfig, TileMap};
 use crate::save::{DeleteSaveRequested, LoadRequested, SaveRequested, SAVE_DIR};
@@ -415,29 +415,29 @@ pub fn action_queue_panel(
     mut notices: ResMut<ActionNotices>,
     mut crop_choice: Local<usize>,
     mut water_depth: Local<Option<f32>>,
-    mut field_target: Local<Option<FieldId>>,
+    mut field_target: ResMut<ActionTargetField>,
 ) {
     egui::SidePanel::left("action_queue").show(contexts.ctx_mut(), |ui| {
         ui.heading("Actions");
 
         // Target: the selected tile, or a whole field.
-        if field_target.is_some_and(|id| registry.get(id).is_none()) {
-            *field_target = None;
+        if field_target.0.is_some_and(|id| registry.get(id).is_none()) {
+            field_target.0 = None;
         }
-        let target_label = match *field_target {
+        let target_label = match field_target.0 {
             Some(id) => registry.get(id).map(|f| f.name.clone()).unwrap_or_default(),
             None => "Selected tile".to_string(),
         };
         egui::ComboBox::from_label("Target")
             .selected_text(target_label)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut *field_target, None, "Selected tile");
+                ui.selectable_value(&mut field_target.0, None, "Selected tile");
                 for f in &registry.fields {
-                    ui.selectable_value(&mut *field_target, Some(f.id), &f.name);
+                    ui.selectable_value(&mut field_target.0, Some(f.id), &f.name);
                 }
             });
 
-        let target: Option<TileOrField> = match *field_target {
+        let target: Option<TileOrField> = match field_target.0 {
             Some(id) => Some(TileOrField::Field(id)),
             None => selected
                 .0

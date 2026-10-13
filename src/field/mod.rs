@@ -166,6 +166,12 @@ impl Default for FieldBrush {
     }
 }
 
+/// The field queued actions currently target; `None` means the selected
+/// tile. Set by the Target dropdown, and by clicking a tile (a tile in a
+/// field targets that field, an unassigned tile targets itself).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct ActionTargetField(pub Option<FieldId>);
+
 pub struct FieldPlugin;
 
 impl Plugin for FieldPlugin {
@@ -173,6 +179,7 @@ impl Plugin for FieldPlugin {
         app.init_resource::<FieldRegistry>()
             .init_resource::<FieldIndex>()
             .init_resource::<FieldBrush>()
+            .init_resource::<ActionTargetField>()
             .add_event::<PaintFieldRequested>()
             .add_event::<DeleteFieldRequested>()
             .add_systems(Update, (apply_paint, delete_field));

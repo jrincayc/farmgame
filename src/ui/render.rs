@@ -43,7 +43,7 @@ use crate::farm::{FarmConfig, SoilState, Tile, TileMap};
 
 use super::sprites::{soil_overlay_color, soil_tint, CropSpriteRoster, SoilSpriteRoster};
 use super::{SelectedTile, ShowSoilOverlay};
-use crate::field::{FieldBrush, FieldRegistry, PaintFieldRequested, TileField};
+use crate::field::{ActionTargetField, FieldBrush, FieldRegistry, PaintFieldRequested, TileField};
 use crate::soil::SoilRoster;
 
 /// World-space size of one tile's square, plus a small gap so tiles
@@ -529,7 +529,7 @@ fn cursor_tile(window: &Window, camera: &Camera, camera_transform: &GlobalTransf
     ))
 }
 
-/// Left-click selects a tile. In field paint mode (`FieldBrush::paint`)
+/// Left-click selects a tile (and retargets queued actions, see above). In field paint mode (`FieldBrush::paint`)
 /// a left-drag instead assigns the dragged rectangle to the active field
 /// (or unassigns it, for the "Unassigned" eraser) on release.
 pub fn tile_click_system(
@@ -541,6 +541,8 @@ pub fn tile_click_system(
     tile_map: Res<TileMap>,
     mut brush: ResMut<FieldBrush>,
     mut paint_events: EventWriter<PaintFieldRequested>,
+    mut target_field: ResMut<ActionTargetField>,
+    tile_fields: Query<&TileField>,
     mut contexts: EguiContexts,
 ) {
     let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), camera_q.single()) else {
@@ -575,13 +577,16 @@ pub fn tile_click_system(
     let Some(coord) = cursor_tile(window, camera, camera_transform) else {
         return;
     };
-    if !tile_map.tiles.contains_key(&coord) {
+    let Some(&entity) = tile_map.tiles.get(&coord) else {
         return;
-    }
+    };
     if brush.paint {
         brush.drag_start = Some(coord);
     } else {
         selected.0 = Some(coord);
+        // A tile in a field targets that field; an unassigned tile
+        // targets itself. The dropdown can still override either.
+        target_field.0 = tile_fields.get(entity).ok().and_then(|f| f.0);
     }
 }
 
@@ -595,6 +600,8 @@ pub fn draw_field_overlay(
     tile_map: Res<TileMap>,
     tiles: Query<(&Tile, &TileField)>,
     all_fields: Query<&TileField>,
+    selected: Res<SelectedTile>,
+    target_field: Res<ActionTargetField>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
 ) {
@@ -613,6 +620,9 @@ pub fn draw_field_overlay(
             let [r, g, b] = info.color;
             let color = Color::srgb_u8(r, g, b);
             let center = tile_world_pos(tile.coord);
+            // The targeted field also gets a white inner outline.
+            let targeted = target_field.0 == Some(id);
+            let inset = (half - 2.5) / half;
             for (offset, start, end) in edges {
                 let neighbour = tile_map
                     .tiles
@@ -621,9 +631,20 @@ pub fn draw_field_overlay(
                     .and_then(|f| f.0);
                 if neighbour != Some(id) {
                     gizmos.line_2d(center + start, center + end, color);
+                    if targeted {
+                        gizmos.line_2d(center + start * inset, center + end * inset, Color::WHITE);
+                    }
                 }
             }
         }
+    }
+
+    // Box on the selected tile: dark outer line plus bright inner line so
+    // it reads on any soil colour.
+    if let Some(coord) = selected.0 {
+        let center = tile_world_pos(coord);
+        gizmos.rect_2d(center, Vec2::splat(TILE_STRIDE), Color::BLACK);
+        gizmos.rect_2d(center, Vec2::splat(TILE_STRIDE - 3.0), Color::srgb(1.0, 0.9, 0.1));
     }
 
     if let (true, Some(start)) = (brush.paint, brush.drag_start) {
@@ -636,4 +657,9 @@ pub fn draw_field_overlay(
             }
         }
     }
+}
+
+/// Thicker gizmo lines so field outlines and the selection box stand out.
+pub fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
+    store.config_mut::<DefaultGizmoConfigGroup>().0.line.width = 3.0;
 }

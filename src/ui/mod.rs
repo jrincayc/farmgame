@@ -83,7 +83,7 @@ impl Plugin for UiPlugin {
             .init_resource::<ShowSoilOverlay>()
             .init_resource::<render::PanelInsets>()
             .init_resource::<CropSpriteRoster>()
-            .add_systems(Startup, (render::setup_camera, sprites::load_soil_sprites))
+            .add_systems(Startup, (render::setup_camera, render::configure_gizmos, sprites::load_soil_sprites))
             .add_systems(
                 Update,
                 (
