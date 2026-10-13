@@ -176,6 +176,8 @@ pub struct TileClimateModifier {
 
 Querying "all tiles with soil but no crop" or "all planted, matured crops" becomes a normal Bevy query (`Query<(&Tile, &SoilState), Without<PlantedCrop>>`), rather than manual iteration/filtering logic.
 
+**Planned change (§6.1–6.2, §6.5, §6.7):** `SoilType` as a closed enum and `SoilState.moisture` as a single 0.0–1.0 number are slated to be replaced by data-driven soil definitions and an explicit water-depth model, and a tile gains an optional field assignment. Nothing above changes until those stages land.
+
 ### 2.3a Soil Dynamics
 
 `SoilState.fertility` was previously undefined behavior — the day-advance diagram (§1.1) named `farm::degrade_soil` but no formula existed, and the prototype spike left fertility static. This fills that gap. **Implemented in Phase 3** (fallow-tile half only — see below).
@@ -220,6 +222,10 @@ Runs on `DayAdvanced`, ordered before `tick_growth` per §1.1's existing chain (
 Exact regen rates and `fertility_impact_per_day` values per crop are a playtesting question (§5), same as the quality-threshold and equipment-capacity numbers already flagged there.
 
 **Moisture (Phase 3, new — not in the original design):** the design doc didn't previously specify a moisture formula beyond "affected by weather" (§3.4). Phase 3 implements it alongside fertility, in the same `degrade_soil` system: each `DayAdvanced`, `SoilState.moisture` changes by `weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION`, clamped to `[0.0, 1.0]`. `RAINFALL_TO_MOISTURE` (fraction of rolled rainfall that actually reaches the soil, vs. runoff) and `DAILY_EVAPORATION` (moisture lost on a dry day) are both placeholders alongside the other tunables flagged in §5. There's no watering/irrigation input yet — that's the action-queue `Water` action in Phase 4 (requirements §4.2's "irrigation or manual watering as a moisture mechanic").
+
+**Phase 8 update (recorded here after the fact; the paragraph above described the Phase 3 formula and had drifted from the code):** rainfall's contribution is softened — `weather.rainfall * RAINFALL_TO_MOISTURE * (1.0 - soil.moisture)` — so a day's rain adds less to an already-wet tile, while evaporation stays a flat subtraction (that flatness is what lets moisture recover instead of clinging just under the ceiling). `ActionKind::Water` applies the same `(1.0 - moisture)` softening to its own bump. See the doc comment on `farm::degrade_soil`.
+
+**Planned (§6.2–6.3):** the single moisture number is slated to become a water depth, with a wilting point, field capacity and saturation per soil, plus drainage, runoff and temperature-scaled evapotranspiration. That also retires the `(1.0 - moisture)` softening, which was a patch for overshoot that a saturation cap and drainage handle physically.
 
 ### 2.4 Crops (Bevy Assets + Component)
 
@@ -318,6 +324,8 @@ Example `assets/crops/tomato.json`:
 
 (Tomato as a short-window, steep-decay crop; a wheat-style crop would use a longer window and gentler per-day stress.)
 
+**Planned schema change (§6.4):** the three moisture fields (`min_moisture`, `max_moisture`, `ideal_moisture_range`) are slated to be replaced by a drought pair and a waterlogging pair, and `CropDef` gains `daily_water_use_mm`, with an optional per-stage `water_use_factor` on `GrowthStage`.
+
 ### 2.5 Economy (Resource)
 
 **Phase 4 note:** `Wallet` is implemented now, as a stub — Phase 4's `Plant` action needs somewhere to deduct `seed_cost` from, and `Harvest` needs an `Inventory` (§2.4's harvested-goods store, not shown separately here since it's a straightforward `HashMap<String, Vec<HarvestedLot>>` keyed by crop id) to add quality-tagged yield to. `Market` and `sale_value()` below are still Phase 5 — there's no selling flow yet, just the wallet/inventory bookkeeping the queue needs to run.
@@ -379,7 +387,7 @@ pub struct Structure {
 }
 ```
 
-**Phase 4 addition — `Clear`:** §2.4's dead-crop state ("stays until explicitly cleared by the player") needed an `ActionKind` to resolve through. Given its own capacity bucket rather than folding into `Till`, since clearing debris and tilling a field are different equipment in practice.
+**Phase 4 addition — `Clear`:** §2.4's dead-crop state ("stays on the tile until explicitly cleared by the player") needed an `ActionKind` to resolve through. Given its own capacity bucket rather than folding into `Till`, since clearing debris and tilling a field are different equipment in practice.
 
 For MVP, `Equipment::daily_capacity` is a fixed set of starting values, not modified by purchases — purchasable upgrades (raising these numbers) and purchasable `Structure`s (like greenhouses, which also spawn a `TileClimateModifier` per covered tile) are both stretch goals sharing one purchase flow: deduct `seed_cost`-equivalent from `Wallet`, then either bump a capacity value or spawn a `Structure` + tile modifiers.
 
@@ -412,6 +420,10 @@ pub struct PendingAction {
 **Stable IDs (requirements §9, resolved):** `PendingAction` carries an `id` from day one, even though MVP's queue UI is FIFO-display-only with no reorder/cancel controls. This is deliberate scope-splitting: the *data* supports player reordering/cancellation now (a `retain`/`remove` on `pending` filtered by `id` is trivial), so building that UI later is additive — it doesn't require migrating `PendingAction` or touching `process_action_queue`. Enqueuing a new action means reading `NextActionId`, using its value as the new action's `id`, then incrementing it.
 
 Processing (`crops::process_action_queue`, run early in the `DayAdvanced` chain, per §1.1): for each `ActionKind`, pop up to `Equipment.daily_capacity[kind]` matching entries off the front of `pending` and apply them; anything left in the queue simply waits for the next `DayAdvanced`. FIFO order per action kind keeps this predictable and legible to the player (§2 pillar) — "I queued these first, they happen first" — rather than needing a priority system for MVP. (A future reorder feature would let the player change that order before resolution; it wouldn't change how resolution itself works.)
+
+**Phase 8 note:** `PendingAction` also carries `water_intensity: f32` (default `1.0`; the "½ Water" button queues `0.5`), a multiplier on the Water action's moisture bump, ignored for every other kind.
+
+**Planned change (§6.6):** `PendingAction.tile: Entity` becomes a `TileOrField` target resolved at processing time, each action tracks which tiles it has already visited, and `water_intensity` becomes `water_depth_mm`.
 
 ### 2.8 Save Data (Serialized snapshot) — **implemented, Phase 7**
 
@@ -467,6 +479,8 @@ This indirection is deliberate: it means save-file format is decoupled from inte
 **`equipment: SavedEquipment`, not `Equipment` directly:** `Equipment::daily_capacity` is a `HashMap<ActionKind, u32>`. Serializing an enum-keyed `HashMap` straight to JSON depends on serde_json's map-key handling for non-string keys, which wasn't worth relying on unverified (no `cargo check` in this workflow — see the project's stated compile-risk convention). `SavedEquipment` instead stores the same data as `Vec<(ActionKind, u32)>`, which is unambiguous regardless.
 
 **What else changed from the original sketch:** `market: Market`, `ui_theme: UiTheme`, `farm_config: FarmConfig`, and `inventory: Inventory` weren't in this section's original `SaveGame` draft — `Inventory` in particular was a real gap (harvested-but-unsold goods would have vanished on load). All four are plain data with no `Entity`/`Handle` fields, so each derives `Serialize`/`Deserialize` directly on the live resource type rather than needing its own mirror struct — see each type's own Phase 7 doc-comment note (`economy::Wallet`/`Inventory`, `economy::Market`, `ui::UiTheme`, `farm::FarmConfig`, `farm::SoilState`) for the specifics. `TimeControl`/`TimeMode` are deliberately **not** persisted — `load_game` always resumes in `Paused`, regardless of what mode was active at save time, so a loaded game never starts ticking days via a Timer the player hasn't just set. `climate::Region` also isn't persisted — it's a single fixed MVP climate (requirements §6), not per-save data.
+
+**Planned additions (§6.8):** per-tile soil id and water depth, per-tile field assignment plus the field registry, and `SavedAction` targets, visited tiles and water depth, each with a migration path for existing saves.
 
 ---
 
@@ -648,7 +662,7 @@ fn yield_factor(cumulative_stress: f32, fertility: f32, moisture: f32) -> f32 {
 }
 ```
 
-`stress_factor` tapers to zero as `cumulative_stress` approaches `YIELD_STRESS_DIVISOR` (a §5-style placeholder). `soil_factor` reflects the tile's fertility/moisture *at harvest time*, but is floored at `MIN_SOIL_YIELD_FACTOR` (also a placeholder, e.g. 0.3) rather than being able to zero out yield on its own — a crop that otherwise grew well on mediocre-but-viable soil shouldn't harvest nothing just because the tile wasn't pristine. `yield_amount` is `(def.base_yield as f32 * yield_factor(...)).round() as u32`.
+`stress_factor` tapers to zero as `cumulative_stress` approaches `YIELD_STRESS_DIVISOR` (a §5-style placeholder). `soil_factor` reflects the tile's fertility/moisture *at harvest time*, but is floored at `MIN_SOIL_YIELD_FACTOR` (also a placeholder, e.g. 0.3) rather than being able to zero out yield on its own — a crop that otherwise grew well on mediocre-but-viable soil shouldn't harvest nothing just because the tile wasn't pristine. `yield_amount` is `(def.base_yield as f32 * yield_factor(...)).round() as u32`. **Planned (§6.4):** the `moisture` input to `soil_factor` has to change when moisture becomes a water depth.
 
 **Dead crops use `Clear`, not `Harvest`:** a `PlantedCrop` with `dead: true` can't be queued for `Harvest` (resolution rejects it, per §3.1a) — it goes through `ActionKind::Clear` instead, which removes the `PlantedCrop` component with no yield, matching §2.4's "stays until explicitly cleared" behavior.
 
@@ -765,6 +779,8 @@ existing cumulative/worst-day/quality figures. See `ui::panels`'
 `temp_status_label`/`moisture_status_label` for the `RangeStatus`-to-
 wording mapping (display-only, doesn't affect simulation).
 
+**Planned (§6.4):** `compute_daily_stress` takes `moisture` today; it is slated to take a drought value and a waterlogging value instead, and to gain a shared evapotranspiration helper alongside it (§6.3), so the inspector can keep showing exactly what the simulation uses.
+
 ## 3.9 Toggleable Save/Load Window (Phase 8)
 
 The save/load window (§3.7) was always open — a floating egui window
@@ -787,6 +803,7 @@ window happens to be open isn't game state.
 - **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5). **Phase 5:** `Market`/`sale_value()`/the sell flow are now implemented (instant, not queued — see §2.5's resolved design question); the futures-market stretch goal remains exactly "write non-1.0 values into `price_modifiers`," unchanged by Phase 5's work.
 - **Multi-region:** `Region` as a singleton `Resource` is an MVP simplification; the `temp_on()` function itself doesn't assume singleton-ness, so multi-region later means changing *how Region is looked up* (per-farm entity vs. global resource), not the climate math.
 - **Real rendering / art pipeline:** Phase 6 shipped only placeholder tile visuals (flat colored squares, text labels) — see requirements doc §10 for the decisions already locked in ahead of that phase (data-driven growth-stage art, layered soil overlays, camera pan/zoom) versus what's still open (overripe-specific art, exact overlay presentation).
+- **Irrigation rig geometry (center pivot, wheel line) and other water-model refinements:** see §6.9 and §6.11. The planned water model deliberately leaves room for them without building them.
 
 ---
 
@@ -802,6 +819,181 @@ window happens to be open isn't game state.
 - **Resolved:** grid size (requirements doc §4.2, §9) — `FarmConfig { width, height }` (§2.3) is a resource, not a compiled-in constant, bounded by `FarmConfig::MIN_DIMENSION`/`MAX_DIMENSION`, with an MVP default of 64×64. A player-facing size picker is stretch UI on top of the same resource.
 - **Resolved:** Bevy version — pinned to `=0.16.0` exactly, with `bevy_egui = "=0.34.1"` as the matching UI integration version.
 - Asset path resolution: Bevy's default `AssetPlugin` looks for files under a single root (`target/<profile>/assets/`), with no built-in multi-location fallback. Confirmed during the prototype spike that this trips people up (assets copied to the project root aren't found until also copied under `target/debug/assets/`). **Resolved for now:** option (a), a `build.rs` that copies `assets/` into `target/<profile>/assets/` automatically on every build — implemented in Phase 1. Option (b), a custom `AssetSource`/`AssetReader` trying multiple candidate roots, remains a possible future upgrade once install-location behavior matters for a release build.
+- **New (planned soil/water/fields work):** the open questions for that work are collected in §6.11 rather than repeated here.
+
+---
+
+## 6. Planned: Soil Definitions, Water Model, and Fields (not yet implemented)
+
+*Status: design agreed in discussion, no code written yet. Sections 2–3 above still describe the code as it currently stands; this section describes where it is going and why. Phase numbers are deliberately unassigned. Every number below is a §5-style placeholder for playtesting.*
+
+**Why this is needed.** Three things in the current design are thin. `SoilType` only changes `fallow_regen_rate` (§2.3a), so soil is almost cosmetic. Moisture is one 0.0–1.0 number that crops compare against ranges, so soils can't differ in how much water they hold or how fast they lose it, and crops don't consume any water at all (`tick_growth` only reads `SoilState`; the only moisture inputs are rain, a flat evaporation constant and the `Water` action). And with a farm of thousands of tiles, single-tile actions are the wrong grain for the player. This section adds data-driven soils, a water model that distinguishes drought from waterlogging, crop transpiration, patchy soil layout, and persistent multi-tile fields.
+
+### 6.1 Soil definitions (data-driven)
+
+`SoilType` stops being a closed enum. Each soil is a `SoilDef` asset loaded from `assets/soil/*.json`, discovered at startup the same way crops are (§3.6: `std::fs::read_dir`, one permanent strong handle per file held in a `SoilRoster`, for the same asset-unloading reason). Adding a soil type means adding a JSON file and a sprite — no code, matching the requirement already in place for crops (requirements §4.3).
+
+```json
+{
+    "id": "loamy",
+    "name": "Loam",
+    "sprite": "soil/loamy.png",
+    "wilting_point": 0.12,
+    "field_capacity": 0.28,
+    "saturation": 0.45,
+    "drainage_rate": 0.30,
+    "evaporation_mm_per_day": 1.0,
+    "fallow_regen_rate": 0.05,
+    "texture": 0.5
+}
+```
+
+`wilting_point`, `field_capacity` and `saturation` are volumetric fractions (the usual soil-science tables). `drainage_rate` is the fraction of water above field capacity lost per day. `evaporation_mm_per_day` is defined at 25 °C (§6.3). `fallow_regen_rate` moves over from the `SoilType` method of the same name. `texture` (0 coarse … 1 fine) is used only to order soils for world generation (§6.7).
+
+Placeholder starter values, textbook-shaped:
+
+| Soil | wilting | field cap. | saturation | accessible (fc − wp) | drainage/day | evap mm/day | fallow regen | texture |
+|---|---|---|---|---|---|---|---|---|
+| Sandy | 0.06 | 0.12 | 0.40 | 0.06 | 0.60 | 1.5 | 0.015 | 0.0 |
+| Loamy | 0.12 | 0.28 | 0.45 | 0.16 | 0.30 | 1.0 | 0.05 | 0.5 |
+| Clay | 0.25 | 0.38 | 0.50 | 0.13 | 0.08 | 0.7 | 0.03 | 1.0 |
+
+Sandy loses water fastest, clay slowest, and loam stores the most plant-available water. Clay holds more water in total than loam, but much of it is held too tightly to be usable — which is why the wilting point is an explicit parameter rather than folded into a capacity.
+
+Tiles carry a small numeric soil id (an index into `SoilRoster`) rather than a `String` per tile; saves store the string id. Soil sprites come from each definition's `sprite` path, replacing the hardcoded `load_soil_sprites` / `SoilSpriteRoster` map keyed by `SoilType`.
+
+### 6.2 Water model
+
+`SoilState.moisture` becomes `SoilState.water_mm`: the water depth in the root zone, bounded by the soil's wilting point and saturation. The JSON fractions convert to depths through one global constant, `ROOT_ZONE_DEPTH_MM` (about 500), so rain, irrigation and evapotranspiration are all plain millimetres. At 500 mm, accessible water is roughly 30 mm for sand, 80 for loam and 65 for clay. (Root depth varying by crop or growth stage is a later refinement; §6.11.)
+
+**Why not a per-soil moisture cap on the existing 0–1 scale.** An earlier idea was to give each soil a maximum moisture. That would silently change what crop moisture ranges mean — a crop with an ideal range of 0.6–0.8 could never reach it on a soil capped at 0.5. The fix is not a cap but a different state: store the water depth, and derive normalized values from it, so crop data stays soil-independent while soils differ in how many millimetres a given value represents.
+
+Two derived values, computed by one method on `SoilState` given its `SoilDef`, and called by both `tick_growth` and the inspector:
+
+- **available** = `((water − wilting) / (field_capacity − wilting)).clamp(0, 1)` — the drought axis.
+- **air** = `saturation − water`, as a volumetric fraction — the waterlogging axis.
+
+**Why waterlogging is measured as air-filled porosity.** Roots are damaged when water has displaced the air in the pores, so the quantity that matters is how much air is left, not how much water there is or what percentage of saturation it represents. With the starter numbers the air left at field capacity is 0.28 for sand, 0.17 for loam and 0.12 for clay, so clay is already marginal on air when fully drained, and it then drains slowly, extending the exposure. Two effects stack, and a percent-of-saturation measure would have hidden the pore-space difference.
+
+**Daily update**, in `degrade_soil`, per `DayAdvanced`, per tile, using that day's temperature (§6.3):
+
+1. **Rain:** add `weather.rainfall × MAX_DAILY_RAIN_MM` (about 40). Anything above saturation is runoff and is lost. This replaces `RAINFALL_TO_MOISTURE` and the Phase 8 `(1.0 − moisture)` softening.
+2. **Drainage:** water above field capacity decays toward it by `drainage_rate` per day.
+3. **Evaporation:** subtract `evaporation_mm_per_day × et_factor(temp)`.
+4. **Transpiration:** if a living crop is planted, subtract `daily_water_use_mm × stage water_use_factor × et_factor(temp)`. Dead crops use none.
+5. **Floor** at the wilting point. Evapotranspiration stops there; evaporation below the wilting point is ignored for simplicity.
+
+The queue's `Water` action still runs after `degrade_soil` and before `tick_growth` (§1.1). It adds its depth the same way rain does (capped at saturation, excess lost), so an over-application shows up as waterlogging that same day and drains on the next one.
+
+One consequence of that ordering: `tick_growth` sees the state after the day's drainage. Sand drains most of a heavy rain within the same update, so it rarely shows a post-rain peak; clay stays near saturation for days.
+
+### 6.3 Evapotranspiration and temperature
+
+Soil evaporation and crop transpiration both scale with temperature:
+
+```rust
+fn et_factor(temp: f32) -> f32 {
+    (temp / 25.0).clamp(0.1, 1.5)
+}
+```
+
+All `*_mm_per_day` values in JSON are therefore "at 25 °C", so authors reason about one number per soil or crop. On the default −5…32 °C curve the factor runs from the 0.1 floor in deep winter to about 1.3 at peak summer.
+
+Two implementation notes. First, `degrade_soil` currently does `events.read().count()` and ignores which day each event is for; it needs to collect each event's `new_day`, as `tick_growth` does, and take `Region` and `Calendar`, so a multi-day catch-up uses each day's own temperature. Second, the calculation lives in one shared `daily_et_mm(soil, crop, stage, temp)` function called by both `degrade_soil` and the inspector, in the same spirit as `compute_daily_stress` (§3.8). The inspector can then show today's water use and a "days of water left at today's rate" figure (`(water − wilting) / daily_et`).
+
+Scale check, from field capacity with about 4 mm/day of crop use plus soil evaporation: roughly 16 dry days on loam, 14 on clay and 5 on sand. If the game year is much shorter than 365 days (`Calendar::year_length`), the ET and drainage rates need to scale with it.
+
+Behavioral consequences worth watching in playtesting: heat stress and drought stress now compound in summer, because hot days dry soil faster, so irrigation capacity matters most when it is hottest; and in cold wet seasons ET is near zero, so a winter crop on clay can waterlog.
+
+### 6.4 Crop schema and stress
+
+`CropDef` changes:
+
+- **Removed:** `min_moisture`, `max_moisture`, `ideal_moisture_range`.
+- **Added (drought axis):** `min_available_water`, `ideal_available_water`.
+- **Added (waterlogging axis):** `min_air_porosity`, `ideal_air_porosity`.
+- **Added (transpiration):** `daily_water_use_mm`, and an optional `water_use_factor` on each `GrowthStage` (serde default `1.0`), so sprouts sip and mid-growth peaks, all in JSON.
+
+`compute_daily_stress` takes `available` and `air` in place of `moisture`. Both axes reuse `range_status` with an infinite maximum, so they can only come out `BelowMin`, `BelowIdeal` or `Ideal`, and `RangeStatus` itself is unchanged. The inspector's status labels need separate wording per axis ("too dry" / "a bit dry" versus "waterlogged" / "soggy"). Stress is scaled per axis: the drought deficit on the 0–1 available scale as before, and the waterlogging deficit normalized by its threshold, `(min_air − air) / min_air`, because air fractions sit around 0.1 and `MOISTURE_STRESS_SCALE` assumes a 0–1 range.
+
+Placeholder example: a tomato with `min_air_porosity` 0.08 and `ideal_air_porosity` 0.15 would be mildly stressed on clay even at field capacity (air 0.12), fine on loam (0.17) and sand (0.28), and badly stressed on any soil at or near saturation.
+
+Waterlogging is a per-day stress for now. Real root damage takes time, and a single post-rain day on well-drained soil would be unfairly punished by the worst-single-day quality axis. Slow clay drainage already produces multi-day exposure on its own; if playtesting shows spikes are too harsh, the fix is a "days below threshold" counter on the same stress path, not a new mechanic.
+
+Other places that need updating when the schema changes:
+
+- `yield_factor`'s `soil_factor = (fertility + moisture) / 2` (§3.3) uses moisture at harvest time. Replace `moisture` with the available-water fraction, and revisit during tuning.
+- `validate_crop_defs` (§3.6) checks that the ideal range falls inside the absolute range for moisture; it needs the equivalent checks for the new pairs.
+- The four starter crop JSON files need hand conversion.
+
+### 6.5 Fields
+
+A field is a named, persistent group of tiles. Each tile carries `field: Option<FieldId>`; `None` means unassigned. The per-tile value is the source of truth.
+
+- **Registry.** A `FieldRegistry` resource maps `FieldId` to `{ name, color }`. IDs are stable and never reused within a session; names are unique, enforced in the UI only. Renaming edits the registry only, so saves and queued actions never depend on a string that can change.
+- **Index.** A `HashMap<FieldId, BTreeSet<…>>` of each field's tiles, kept in sync by the paint tool and rebuilt from the per-tile values on load, so resolving a field never means scanning every tile on a multi-thousand-tile farm.
+- **Paint tool.** A brush model: pick an active field (or "Unassigned", which acts as the eraser) and drag a rectangle. Assigning a tile to a field removes it from its previous one, so there is no separate removal step. Fields are arbitrary tile sets painted in rectangular drags, not rectangles only. Create, rename and delete live in a small panel; deleting a field sets its tiles back to `None`. **Naming:** "zone" is a familiar convention for the assigning side, but avoid "Clear" for the unassigning side — `ActionKind::Clear` already means clearing a dead crop (§2.6). "Release" or "Unassigned" avoids the collision.
+- **Tractor order.** When a field is worked, its tiles are visited in boustrophedon order: rows numbered from the top of the farm starting at 1, odd rows worked right to left and even rows left to right (the tractor enters at the top and moves left, then down, then right, and so on). Parity is taken from the **farm-global row number**, not the row's position within the field, so painting a tile above the field mid-job doesn't flip every row's direction. The order is derived when needed from the field's tiles, never stored. Tile coordinates use Bevy's y-up axis, so the implementation must convert to rows counted from the top.
+- **Rendering.** Draw field boundaries as outlines on edges where neighbouring tiles' field ids differ, rather than tinting tiles, because a tint would clash with the moisture/fertility tint (`soil_tint()`). Toggleable, alongside a soil-type overlay as its sibling; with patchy soil (§6.7) the player needs both when deciding where to draw a field. The drawing mechanism is left open, given the per-tile child-entity layering already used for soil, tilled overlay and crop.
+- **Inspector.** A field-level summary: tile count, share of tiles below the drought threshold, share waterlogged, and millimetres needed to reach field capacity (mean, min, max), since mixed soils within a field respond differently to the same action.
+
+### 6.6 Action queue with field targets
+
+`PendingAction.tile: Entity` becomes `target: TileOrField`, either a single tile or a field, resolved when the action is processed rather than when it is queued. A field's tiles are looked up through the field index in tractor order (§6.5).
+
+**Per-action visited set.** Every `PendingAction` carries the set of tiles it has already visited. Each day's processing walks the target's tiles in tractor order, skips visited ones, and for each remaining tile either applies the action (consuming equipment capacity) or, if it does not apply there (untilled for Plant, no mature crop for Harvest, and so on), marks the tile visited and counts it as skipped (consuming no capacity). The action completes when every tile currently in the field is visited. The queue panel shows live counts: applied, skipped, remaining.
+
+*Correction from an earlier draft of this design:* completion was first sketched as purely derived from tile state ("done when no tile still needs the action"). That works for Till, Plant, Harvest and Clear, whose effect makes the action inapplicable afterwards, but not for Water or Fertilize, which add an amount and leave nothing in tile state saying "already done" — a field Water action would never finish. A visited set handles every kind uniformly and also settles whether a Plant action should wait for tiles tilled later the same day (it does not; they are skipped and reported).
+
+Consequences of resolving at processing time:
+
+- **Live membership.** Tiles added to a field mid-job are picked up, and tiles removed from it are ignored.
+- **Deleted or emptied fields.** An action whose field no longer exists is dropped with a visible notice, never a panic or a hang; an empty field completes immediately.
+- **Determinism.** Visited set plus deterministic order means saving and loading mid-job resumes the same way.
+- **Single tiles.** A `Tile` target is the one-tile case of the same logic.
+
+**Water in millimetres.** `water_intensity` becomes `water_depth_mm`. The UI offers a depth control in 5 mm steps with 10/20/30 presets, replacing the "½ Water" button. The depth is applied to every visited tile and capped at saturation. Equipment capacity remains per tile, so a deep soak is no slower than a light one; measuring capacity in millimetres × tiles is a possible later refinement (§6.9).
+
+### 6.7 Soil distribution
+
+Soils are currently laid out in columns. Replace this with one continuous texture field generated from seeded 2D noise (simplex or Perlin), thresholded into the available soils ordered by their `texture` value, so sandy tends to border loam and loam to border clay, and sandy-against-clay boundaries are rare. A new soil type slots in by its `texture` value with no code change. Target proportions set the thresholds (roughly 25/50/25 coarse/medium/fine for the starter three), and one frequency parameter sets patch size: tens to low hundreds of tiles for a multi-thousand-tile farm, with optional domain warping to avoid blobby results.
+
+- The seed lives in `FarmConfig` with a serde default, so existing saves still load. Saves already store each tile's soil (`SavedTile.soil`), so loading never regenerates soil and old column-layout saves keep working unchanged.
+- Adding a field to `FarmConfig` breaks tests that build it as a struct literal (`FarmConfig { width, height }`); they need `..Default::default()` or an updated constructor.
+- `starting_soil_types_are_varied_across_a_small_farm` builds a 33×33 farm and asserts more than one soil type appears. With patches larger than the farm that can fail, so it should use a fixed seed known to produce variety, or test the generator on a larger grid.
+
+### 6.8 Save format changes
+
+- `SavedTile` / `SoilState`: a soil id string (legacy `"Sandy"` / `"Loamy"` / `"Clay"` map to the new ids on load), `water_mm` in place of `moisture` with a load-time mapping from old values rather than discarding existing saves, and the tile's field assignment.
+- A `FieldRegistry` snapshot (fields plus the next id counter) in `SaveGame`.
+- `SavedAction`: the target (a tile coordinate or a field id), the visited-tile list, and `water_depth_mm`. For old saves, map `water_intensity` 1.0 to 20 mm and 0.5 to 10 mm, with serde defaults for missing fields.
+- `FarmConfig`: the noise seed, with a serde default.
+
+### 6.9 Irrigation scope
+
+For now, irrigation is a `Water` action targeting a field with a depth, applied to the whole field. Real rigs differ — a center pivot covers a circle, a wheel line covers one row at a time — and their coverage does not follow field boundaries. Keep `TileOrField` resolving to "a set of tiles in an order" without assuming the target is a field, so a coverage-shaped target can be added later. Equipment capacity measured in volume (mm × tiles) rather than tiles would also make a deep soak cost more throughput than a light one, and suits those rigs; deferred.
+
+### 6.10 Stages and tests
+
+Each stage is testable on its own:
+
+1. **Soil definitions.** `SoilDef` JSON, roster and sprites, with behavior identical to today; save migration for the soil id.
+2. **Water model.** `water_mm`, drainage, runoff, derived available/air values, the new crop schema and stress function, the `Water` action in millimetres, soil evaporation with temperature scaling, the inspector, the `yield_factor` update, the `validate_crop_defs` update, and conversion of the four starter crops.
+3. **Transpiration.** `daily_water_use_mm` and per-stage factors, including the dead-crop check.
+4. **Soil distribution.** Noise generation and the soil-type overlay.
+5. **Fields.** Data model, registry, paint tool and boundary overlay first; then `TileOrField` queue targets with visited-set semantics.
+
+Two existing tests reference `soil.moisture` directly and must be rewritten in stage 2: `moisture_stays_within_bounds_over_many_days` becomes "water stays between wilting point and saturation", and `rain_contribution_shrinks_as_moisture_approaches_saturation` becomes "rain on saturated soil adds nothing". New tests should cover drainage by soil type, runoff at saturation, ET scaling with temperature, dead crops using no water, tractor order (including parity from the global row), the visited-set completion rule for both state-derived and amount-adding actions, and deleted-field handling.
+
+### 6.11 Open questions
+
+- Name for the field-assignment tool pair ("zone" / "release"?) — see the `Clear` collision in §6.5.
+- Whether waterlogging needs a duration counter (§6.4); decide after playtesting.
+- Fixed `ROOT_ZONE_DEPTH_MM` versus root depth by crop or growth stage.
+- Refinements deliberately left out of the first version: ET tapering as soil dries, canopy shading of soil evaporation, soil-dependent infiltration limits (clay absorbing rain more slowly), and capacity measured in volume.
+- Whether world-generation proportions of soil types should be configurable per farm.
+- Presentation of the soil-type and field-boundary overlays.
+- Tractor-order row numbering and Bevy's y-up coordinates — confirm the convention when implementing.
 
 ---
 

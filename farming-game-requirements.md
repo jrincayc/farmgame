@@ -57,6 +57,21 @@ Things to keep in mind given "some coding experience, new to games":
 - Tilling, fertilizing, and soil degradation/regeneration over time
 - Fertility changes over time based on what's planted (or not planted) on a tile — heavy feeders drain it, cover crops/legumes replenish it, fallow tiles slowly regenerate. Crop rotation is intentionally not a named system — it should fall out of these per-crop values the same way growing-season suitability falls out of comparing crop tolerance to regional climate (§4.3a). See design doc §2.3a for the mechanism.
 - Irrigation or manual watering as a moisture mechanic
+- **Soil types are data, not code (planned; design doc §6.1):** each soil type is a JSON definition — wilting point, field capacity, saturation, drainage rate, evaporation rate, fallow regeneration rate, sprite — so adding a soil type means adding a file, the same property required of crops (§4.3). The starter set remains sandy, loamy and clay.
+- **Water model (planned; design doc §6.2):** soil water is tracked as a depth in millimetres. Plant-available water (between the wilting point and field capacity) drives drought stress; the air left in the soil pores (saturation minus water) drives waterlogging damage. Soils differ in how much plant-available water they hold and how fast they lose it: sandy drains and dries fastest, clay slowest, and loam stores the most plant-available water. Rain, irrigation and evapotranspiration are all expressed in millimetres.
+- **Evapotranspiration (planned; design doc §6.3):** soil evaporation and crop transpiration remove water every day, scaled by temperature, so hot spells dry soil faster and cold spells barely at all. Crops declare how much water they use.
+- **Soil layout (planned; design doc §6.7):** soil types are laid out in coherent patches (neighbouring textures grade into one another) rather than in columns, and the player can see each tile's soil type before committing to decisions that depend on it.
+
+### 4.2a Fields (planned; design doc §6.5–6.6)
+
+Single-tile actions are the wrong grain on a farm of thousands of tiles. Planned requirements:
+
+- Tiles can be assigned to named **fields**. A tile belongs to at most one field, or to none; assigning a tile to a field removes it from its previous one.
+- The player can create, rename and delete fields, and assign or unassign tiles with a paint tool (drag a rectangle with an active field to add tiles, or with "unassigned" to remove them). Deleting a field unassigns its tiles. Field boundaries are visible on the map and toggleable.
+- Queued actions can target a single tile or a whole field (§4.6a). A field's tiles are determined when the action is processed, not when it is queued, so tiles added to the field in the meantime are included.
+- A field's tiles are worked in a tractor-like path (rows taken from the top, alternating direction), subject to the same equipment capacity limit as any other action.
+- Tiles where an action doesn't apply (for example, planting on untilled ground) are skipped and reported, not treated as an error; the queue shows applied, skipped and remaining counts.
+- The UI summarises a field's state (for example, how many of its tiles are too dry or waterlogged) as well as individual tiles'.
 
 ### 4.3 Crops
 
@@ -78,6 +93,9 @@ Suggested crop data schema (fields to define per crop):
 | `water_requirement` | **Superseded (Phase 4):** see `min_moisture`/`max_moisture`/`ideal_moisture_range` below. A single scalar only modeled under-watering; over-watering (waterlogging, root rot) is a real failure mode too, so moisture is now specified the same way temperature is — an absolute viable range plus a narrower ideal range. |
 | `min_moisture` / `max_moisture` | Absolute moisture range (on `SoilState.moisture`'s 0.0–1.0 scale) the crop survives at all |
 | `ideal_moisture_range` | Narrower range for full/ideal yield and quality; tapers/penalizes outside it the same way `ideal_temp_range` does |
+| `min_available_water` / `ideal_available_water` | **Planned (design doc §6.4); replaces the three moisture-range fields above.** Drought thresholds on plant-available water (0–1, between the soil's wilting point and field capacity) |
+| `min_air_porosity` / `ideal_air_porosity` | **Planned (§6.4).** Waterlogging thresholds on the air left in the soil pores; lets crops differ in waterlogging tolerance |
+| `daily_water_use_mm` | **Planned (§6.4).** Water the crop transpires per day at 25 °C, scaled by temperature and optionally per growth stage (`water_use_factor`) |
 | `fertility_requirement` | Minimum soil fertility to grow well |
 | `base_yield` | Amount produced at harvest under ideal conditions |
 | `yield_modifiers` | How cumulative (average, ongoing) conditions scale total yield quantity |
@@ -109,6 +127,7 @@ This is more setup than a flat season enum, but it's what actually earns "data-d
 ### 4.4 Weather
 - Randomized but bounded weather per day (affects moisture, growth rate)
 - Seasonal weather patterns (frost risk in fall/winter, drought risk in summer)
+- **Planned (design doc §6.2–6.3):** rainfall is expressed as a depth in millimetres, and temperature drives evapotranspiration (hot days dry soil faster and use more crop water; cold days barely at all).
 
 ### 4.5 Economy
 - Selling harvested goods: for MVP, price is **static per crop but formula-shaped**: `sale_value = sell_price * quality_multiplier * time_factor`. `quality_multiplier` comes from the harvest's quality grade (§4.3); `time_factor` is fixed at `1.0` for MVP but exists as a real term in the formula so variable/seasonal pricing later (stretch) is a matter of changing what feeds that term, not restructuring the sale calculation.
@@ -153,6 +172,8 @@ This is the mechanic that makes "Paused" mode meaningful rather than just a menu
 - On `DayAdvanced` (whether triggered by Step or by Timer), the game processes queued actions up to each action type's capacity limit, in queue order; anything beyond capacity simply carries over and resolves on the next day-advance
 - This makes equipment a real throughput constraint rather than a cosmetic upgrade — a larger farm genuinely needs better equipment, not just more player clicking, which reinforces "respect the player's time" (§2) by letting them plan a day's work in one pass while paused rather than micromanaging tile-by-tile in real time
 - MVP ships with one fixed, default equipment set (fixed capacities, not purchasable); purchasable equipment upgrades that increase capacity are a stretch goal (§7)
+- **Planned (design doc §6.6):** queue entries can target a field as well as a tile (§4.2a). The field's tiles are resolved when the action is processed, in tractor-path order, and each queued action remembers which tiles it has already visited, so that actions which add an amount (watering, fertilizing) finish correctly as well as actions that change tile state (tilling, planting, harvesting).
+- **Planned (design doc §6.6):** watering takes a depth in millimetres chosen by the player, replacing the fixed full- and half-strength watering buttons. The depth is applied to each tile; equipment capacity stays per tile.
 
 ### 4.7 Scheduling & Automation
 
@@ -196,6 +217,8 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 - Livestock
 - Weather events (drought, frost) with strategic tool counters
 - NPCs or light narrative layer
+- Irrigation rigs with real coverage geometry (center pivot, wheel line) and equipment capacity measured in volume rather than tiles (design doc §6.9)
+- Water-model refinements: root depth varying by crop and growth stage, soil-dependent infiltration limits, evapotranspiration that tapers as soil dries, and waterlogging damage that accumulates over time rather than per day (design doc §6.4, §6.11)
 
 ## 8. Project Context
 
@@ -213,6 +236,9 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 - **Resolved (Phase 6):** the action queue/tile-inspector UI needed *some* way to pick a tile without full farm rendering. Landed on a minimal clickable placeholder grid (flat colored `Sprite` squares + a crop-initial `Text2d` label) rather than coordinate text-entry, since it's more honest to how tile selection will actually feel once real rendering exists. See the new "Rendering / Art Pipeline" phase note below for what's still undecided about the real version.
 - **New (Phase 6, open):** the placeholder grid has no pan/zoom — camera is fixed, framed to the default farm size. A non-default (especially larger) `FarmConfig` will frame worse. Real camera controls were deliberately deferred to the rendering/art-pipeline phase rather than built against throwaway placeholder art.
 - **Resolved (Phase 6b):** two related bugs from Phase 6 playtesting — hardcoded crop lists in the UI, and `CropDef` assets unloading between harvest and sell (both crops and sale flow were affected by having no permanent strong `Handle<CropDef>` anywhere). Both closed by `crops::roster::CropRoster`, which discovers `assets/crops/*.json` at startup and holds one handle per crop for the app's lifetime. See design doc §3.6.
+- **New (planned soil/water/fields work, open):** what to call the field-assignment tools. "Zone" is a familiar convention for assigning tiles; avoid "Clear" for the opposite, since `ActionKind::Clear` already means clearing a dead crop (design doc §6.5).
+- **New (planned soil/water/fields work, open):** whether waterlogging damage needs a duration (days below the air threshold) rather than a per-day value — decide after playtesting (design doc §6.4).
+- **New (planned soil/water/fields work, open):** whether the proportions of each soil type at world generation should be configurable per farm, or fixed at a sensible default (design doc §6.7).
 
 ## 10. Rendering / Art Pipeline (new phase, scope TBD)
 
@@ -222,6 +248,8 @@ Placeholder tile visuals shipped in Phase 6 (flat colored squares, text-letter l
 - **Soil visuals are layered, not flat per-combination textures** — a base texture per `SoilType`, a tilled overlay, and moisture/fertility as tints or overlays on top, rather than needing a separate flat image per (soil type × tilled state × moisture bucket) combination.
 - **Overripening has no distinct visual state yet** — it's pure stress accumulation on the `mature`/final stage (§3.2), not a separate stage, so there's nothing to swap art on without adding one. Left open whether that's worth adding later.
 - **Camera pan/zoom — resolved, implemented ahead of this phase.** Originally deferred alongside real sprites on the reasoning that building camera controls against Phase 6's placeholder squares would be throwaway work; pulled forward once fixed-camera playtesting on a multi-thousand-tile farm proved painful in practice. Scroll wheel / top-bar buttons for zoom (whole-farm-visible up to 16x that), arrow keys / middle-click-drag / Ctrl+Cmd+left-drag for pan, clamped to the farm's extent, resize-safe (zoom/pan bounds recompute from the live window size each frame rather than a fixed reference resolution). Implemented as `Camera`/`Transform`/`Projection` logic decoupled from tile-visual code, so it's expected to survive the later switch to real sprites without a rewrite."
+- **Planned (design doc §6.1):** the base soil sprite for each soil type is named by that soil definition's `sprite` path rather than a hardcoded map, so a new soil type brings its own art.
+- **Planned (design doc §6.5, §6.7):** two toggleable map overlays — soil type, and field boundaries. Field boundaries are drawn as outlines on the edges between differing fields rather than as a tile tint, so they don't clash with the moisture/fertility tint.
 
 ---
 
