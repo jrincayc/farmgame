@@ -1,0 +1,12 @@
+{
+    "id": "sandy",
+    "name": "Sand",
+    "sprite": "soil/sandy.png",
+    "wilting_point": 0.06,
+    "field_capacity": 0.12,
+    "saturation": 0.40,
+    "drainage_rate": 0.60,
+    "evaporation_mm_per_day": 1.5,
+    "fallow_regen_rate": 0.015,
+    "texture": 0.0
+}

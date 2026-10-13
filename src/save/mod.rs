@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, Equipment, NextActionId, PendingAction, PlantedCrop};
 use crate::economy::{Inventory, Market, Wallet};
 use crate::farm::{self, FarmConfig, SoilState, Tile, TileMap};
+use crate::soil::SoilRoster;
 use crate::time::{Calendar, TimeControl, TimeMode};
 use crate::ui::UiTheme;
 
@@ -118,19 +119,77 @@ struct SavedCrop {
     dead: bool,
 }
 
+/// Mirror of `SoilState`: the soil is stored by string id (not the
+/// roster index, which depends on which soil files exist) and the water as
+/// a depth in mm. The `Option` fields let saves from before the soil
+/// definitions / water model (`soil_type` + 0-1 `moisture`) still load -
+/// see `SavedSoil::to_state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedSoil {
+    fertility: f32,
+    tilled: bool,
+    #[serde(default)]
+    soil_id: Option<String>,
+    #[serde(default)]
+    water_mm: Option<f32>,
+    /// Legacy: `"Sandy"` / `"Loamy"` / `"Clay"`.
+    #[serde(default, skip_serializing)]
+    soil_type: Option<String>,
+    /// Legacy: 0.0-1.0.
+    #[serde(default, skip_serializing)]
+    moisture: Option<f32>,
+}
+
+impl SavedSoil {
+    fn from_state(soil: &SoilState, soils: &SoilRoster) -> Self {
+        Self {
+            fertility: soil.fertility,
+            tilled: soil.tilled,
+            soil_id: Some(soils.get(soil.soil as usize).id.clone()),
+            water_mm: Some(soil.water_mm),
+            soil_type: None,
+            moisture: None,
+        }
+    }
+
+    /// `fallback_index` is the freshly generated soil for this tile, used
+    /// if the saved id no longer exists in the roster.
+    fn to_state(&self, soils: &SoilRoster, fallback_index: u8) -> SoilState {
+        let id = self.soil_id.as_ref().or(self.soil_type.as_ref());
+        let index = id
+            .and_then(|id| soils.index_of(id))
+            .map(|i| i as u8)
+            .unwrap_or_else(|| {
+                if let Some(id) = id {
+                    warn!("Save references soil '{}', which no longer exists - using generated soil", id);
+                }
+                fallback_index
+            });
+        let def = soils.get(index as usize);
+        let water_mm = match (self.water_mm, self.moisture) {
+            (Some(mm), _) => mm,
+            // Old 0-1 moisture: map linearly from wilting point to saturation.
+            (None, Some(m)) => def.wilting_mm() + m.clamp(0.0, 1.0) * (def.saturation_mm() - def.wilting_mm()),
+            (None, None) => def.field_capacity_mm(),
+        };
+        SoilState {
+            fertility: self.fertility,
+            water_mm: water_mm.clamp(def.wilting_mm(), def.saturation_mm()),
+            soil: index,
+            tilled: self.tilled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedTile {
     coord: IVec2,
-    soil: SoilState,
+    soil: SavedSoil,
     planted_crop: Option<SavedCrop>,
 }
 
-/// Default used by `SavedAction::water_intensity` when loading a save
-/// file written before that field existed - full-strength watering,
-/// matching the only behavior that existed at the time.
-fn default_water_intensity() -> f32 {
-    1.0
-}
+/// Depth the legacy `water_intensity` of 1.0 maps to (0.5 maps to half).
+const LEGACY_FULL_WATERING_MM: f32 = 20.0;
 
 /// Mirror of `PendingAction`, substituting the tile's farm coordinate
 /// for the live `Entity` (re-resolved via the freshly-rebuilt `TileMap`
@@ -142,12 +201,13 @@ struct SavedAction {
     tile_coord: IVec2,
     kind: ActionKind,
     crop_to_plant: Option<String>,
-    /// **Phase 8 addition**, mirroring `PendingAction::water_intensity`.
-    /// `#[serde(default)]` so older save files (written before this
-    /// field existed) still deserialize, defaulting every action to
-    /// full intensity rather than failing to load.
-    #[serde(default = "default_water_intensity")]
-    water_intensity: f32,
+    /// Mirrors `PendingAction::water_depth_mm`. Missing in older saves,
+    /// which stored `water_intensity` instead.
+    #[serde(default)]
+    water_depth_mm: Option<f32>,
+    /// Legacy: 1.0 = full, 0.5 = half watering.
+    #[serde(default, skip_serializing)]
+    water_intensity: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +273,7 @@ fn save_game(
     tiles: Query<(&Tile, &SoilState, Option<&PlantedCrop>)>,
     tile_lookup: Query<&Tile>,
     crop_defs: Res<Assets<CropDef>>,
+    soils: Res<SoilRoster>,
 ) {
     for ev in events.read() {
         let Some(path) = sanitized_path(&ev.name) else {
@@ -236,7 +297,7 @@ fn save_game(
                 });
                 SavedTile {
                     coord: tile.coord,
-                    soil: soil.clone(),
+                    soil: SavedSoil::from_state(soil, &soils),
                     planted_crop,
                 }
             })
@@ -263,7 +324,8 @@ fn save_game(
                     tile_coord: tile.coord,
                     kind: action.kind,
                     crop_to_plant,
-                    water_intensity: action.water_intensity,
+                    water_depth_mm: Some(action.water_depth_mm),
+                    water_intensity: None,
                 })
             })
             .collect();
@@ -343,8 +405,8 @@ fn load_game(
     mut control: ResMut<TimeControl>,
     mut tile_map: ResMut<TileMap>,
     existing_tiles: Query<Entity, With<Tile>>,
-    roster: Res<CropRoster>,
-    crop_defs: Res<Assets<CropDef>>,
+    // Grouped: a system function takes at most 16 parameters.
+    (roster, crop_defs, soils): (Res<CropRoster>, Res<Assets<CropDef>>, Res<SoilRoster>),
 ) {
     for ev in events.read() {
         let Some(path) = sanitized_path(&ev.name) else {
@@ -372,7 +434,7 @@ fn load_game(
 
         // 2. Rebuild at the saved size.
         *config = save.farm_config.clone();
-        farm::spawn_tile_grid(&mut commands, &config, &mut tile_map);
+        farm::spawn_tile_grid(&mut commands, &config, &mut tile_map, &soils);
 
         // 3. Overwrite each tile's soil, and re-plant if the save had a
         // live crop there.
@@ -384,7 +446,8 @@ fn load_game(
                 );
                 continue;
             };
-            commands.entity(entity).insert(saved_tile.soil.clone());
+            let fallback = saved_tile.soil.to_state(&soils, 0);
+            commands.entity(entity).insert(fallback);
 
             if let Some(saved_crop) = &saved_tile.planted_crop {
                 match resolve_crop_handle(&saved_crop.crop_id, &roster, &crop_defs) {
@@ -437,7 +500,10 @@ fn load_game(
                 tile: tile_entity,
                 kind: saved_action.kind,
                 crop_to_plant,
-                water_intensity: saved_action.water_intensity,
+                water_depth_mm: saved_action
+                    .water_depth_mm
+                    .or(saved_action.water_intensity.map(|i| i * LEGACY_FULL_WATERING_MM))
+                    .unwrap_or(LEGACY_FULL_WATERING_MM),
             });
         }
         next_id.0 = save.next_action_id;
@@ -476,5 +542,27 @@ fn delete_save(mut events: EventReader<DeleteSaveRequested>) {
             Ok(()) => info!("Deleted save {:?}", path),
             Err(e) => error!("Failed to delete save {:?}: {}", path, e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_soil_and_watering_fields_still_load() {
+        let soil: SavedSoil =
+            serde_json::from_str(r#"{"fertility":0.5,"moisture":0.5,"soil_type":"Clay","tilled":true}"#).unwrap();
+        let roster = SoilRoster::load_from_dir(crate::soil::SOILS_DIR);
+        let state = soil.to_state(&roster, 0);
+        let clay = roster.get(roster.index_of("clay").unwrap());
+        assert_eq!(roster.get(state.soil as usize).id, "clay");
+        assert!(state.water_mm > clay.wilting_mm() && state.water_mm < clay.saturation_mm());
+        assert!(state.tilled);
+
+        let action: SavedAction =
+            serde_json::from_str(r#"{"id":1,"tile_coord":[0,0],"kind":"Water","crop_to_plant":null,"water_intensity":0.5}"#)
+                .unwrap();
+        assert_eq!(action.water_intensity.unwrap() * LEGACY_FULL_WATERING_MM, 10.0);
     }
 }

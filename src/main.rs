@@ -15,6 +15,7 @@ mod economy;
 mod farm;
 mod save;
 mod sim_order;
+mod soil;
 mod time;
 mod ui;
 
@@ -184,10 +185,8 @@ fn enqueue_action(
         tile,
         kind,
         crop_to_plant,
-        // Dev keyboard controls only ever queue full-strength watering
-        // - there's no key bound for "½ Water" (that's a Phase 8 UI-only
-        // addition, see ui::panels::action_queue_panel).
-        water_intensity: 1.0,
+        // Dev keyboard controls queue a standard 20 mm watering.
+        water_depth_mm: 20.0,
     });
 }
 
@@ -238,7 +237,7 @@ fn log_day_advanced(
 
 /// Dev-only console summary so Phase 3's soil simulation is observable
 /// before any UI exists, matching the pattern used for climate/weather
-/// in Phase 2. Prints the farm-wide average fertility/moisture rather
+/// in Phase 2. Prints the farm-wide average fertility/water depth rather
 /// than every tile, since even the MVP default (64x64 = 4,096 tiles)
 /// would flood the console otherwise.
 fn log_soil_summary(mut events: EventReader<DayAdvanced>, tiles: Query<&SoilState>) {
@@ -253,10 +252,10 @@ fn log_soil_summary(mut events: EventReader<DayAdvanced>, tiles: Query<&SoilStat
 
     let (fertility_sum, moisture_sum) = tiles
         .iter()
-        .fold((0.0, 0.0), |(f, m), soil| (f + soil.fertility, m + soil.moisture));
+        .fold((0.0, 0.0), |(f, m), soil| (f + soil.fertility, m + soil.water_mm));
 
     info!(
-        "  soil avg -> fertility {:.3} | moisture {:.3} (across {} tiles)",
+        "  soil avg -> fertility {:.3} | water {:.1} mm (across {} tiles)",
         fertility_sum / count as f32,
         moisture_sum / count as f32,
         count

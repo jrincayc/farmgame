@@ -1,0 +1,12 @@
+{
+    "id": "loamy",
+    "name": "Loam",
+    "sprite": "soil/loamy.png",
+    "wilting_point": 0.12,
+    "field_capacity": 0.28,
+    "saturation": 0.45,
+    "drainage_rate": 0.30,
+    "evaporation_mm_per_day": 1.0,
+    "fallow_regen_rate": 0.05,
+    "texture": 0.5
+}

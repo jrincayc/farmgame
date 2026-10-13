@@ -29,7 +29,7 @@ use bevy_egui::{EguiContextPass, EguiPlugin};
 use serde::{Deserialize, Serialize};
 
 pub use render::CameraState;
-pub use sprites::{CropSpriteRoster, SoilSpriteRoster};
+pub use sprites::CropSpriteRoster;
 
 /// Currently-clicked tile, read by every tile-targeted panel (inspector,
 /// action queue). `None` until the player clicks a tile for the first
@@ -64,6 +64,12 @@ impl Default for UiTheme {
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct SaveLoadWindowOpen(pub bool);
 
+/// Whether tiles are drawn as flat soil-type colours (design doc §6.7)
+/// instead of textured/tinted soil, so the player can see the soil layout
+/// at a glance. Not persisted.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct ShowSoilOverlay(pub bool);
+
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -74,6 +80,7 @@ impl Plugin for UiPlugin {
             .init_resource::<SelectedTile>()
             .init_resource::<UiTheme>()
             .init_resource::<SaveLoadWindowOpen>()
+            .init_resource::<ShowSoilOverlay>()
             .init_resource::<CropSpriteRoster>()
             .add_systems(Startup, (render::setup_camera, sprites::load_soil_sprites))
             .add_systems(

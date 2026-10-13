@@ -25,7 +25,8 @@ use crate::save::{DeleteSaveRequested, LoadRequested, SaveRequested, SAVE_DIR};
 use crate::time::{Calendar, StepDayRequested, TimeControl, TimeMode, TimerSpeed};
 
 use super::render::{farm_world_center, BUTTON_ZOOM_STEP, MAX_ZOOM_FACTOR, MIN_ZOOM_FACTOR};
-use super::{CameraState, SaveLoadWindowOpen, SelectedTile, UiTheme};
+use super::{CameraState, SaveLoadWindowOpen, SelectedTile, ShowSoilOverlay, UiTheme};
+use crate::soil::{self, SoilRoster};
 use crate::farm::SoilState;
 use crate::crops::PlantedCrop;
 use crate::crops::crop_def;
@@ -42,16 +43,21 @@ fn temp_status_label(status: RangeStatus) -> &'static str {
     }
 }
 
-/// Same idea as `temp_status_label`, but with moisture-appropriate
-/// wording ("dry"/"wet" rather than "cold"/"hot") for the same
-/// `RangeStatus` values.
-fn moisture_status_label(status: RangeStatus) -> &'static str {
+/// Drought-axis wording for `RangeStatus` (plant-available water).
+fn drought_status_label(status: RangeStatus) -> &'static str {
     match status {
         RangeStatus::BelowMin => "too dry (risk of death)",
-        RangeStatus::AboveMax => "too wet (risk of death)",
         RangeStatus::BelowIdeal => "a bit dry",
-        RangeStatus::AboveIdeal => "a bit wet",
-        RangeStatus::Ideal => "ideal",
+        _ => "ideal",
+    }
+}
+
+/// Waterlogging-axis wording for `RangeStatus` (air-filled porosity).
+fn waterlog_status_label(status: RangeStatus) -> &'static str {
+    match status {
+        RangeStatus::BelowMin => "waterlogged (risk of death)",
+        RangeStatus::BelowIdeal => "soggy",
+        _ => "ideal",
     }
 }
 
@@ -90,6 +96,7 @@ pub fn top_bar(
     mut camera_state: ResMut<CameraState>,
     config: Res<FarmConfig>,
     mut save_load_open: ResMut<SaveLoadWindowOpen>,
+    mut soil_overlay: ResMut<ShowSoilOverlay>,
 ) {
     let ctx = contexts.ctx_mut();
     apply_theme(ctx, &theme);
@@ -179,6 +186,8 @@ pub fn top_bar(
                 save_load_open.0 = !save_load_open.0;
             }
 
+            ui.checkbox(&mut soil_overlay.0, "Soil types");
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if theme.dark { "Light theme" } else { "Dark theme" };
                 if ui.button(label).clicked() {
@@ -202,6 +211,7 @@ pub fn tile_inspector_panel(
     region: Res<Region>,
     calendar: Res<Calendar>,
     weather: Res<WeatherToday>,
+    soils: Res<SoilRoster>,
 ) {
     egui::SidePanel::right("tile_inspector").show(contexts.ctx_mut(), |ui| {
         ui.heading("Selected Tile");
@@ -221,9 +231,17 @@ pub fn tile_inspector_panel(
             return;
         };
 
-        ui.label(format!("Soil type: {:?}", soil.soil_type));
+        let soil_def = soils.get(soil.soil as usize);
+        let available = soil_def.available(soil.water_mm);
+        let air = soil_def.air(soil.water_mm);
+        ui.label(format!("Soil type: {}", soil_def.name));
         ui.label(format!("Fertility: {:.2}", soil.fertility));
-        ui.label(format!("Moisture: {:.2}", soil.moisture));
+        ui.label(format!(
+            "Water: {:.0} mm (available {:.0}%, air {:.2})",
+            soil.water_mm,
+            available * 100.0,
+            air
+        ));
         ui.label(format!("Tilled: {}", soil.tilled));
 
         ui.separator();
@@ -275,7 +293,8 @@ pub fn tile_inspector_panel(
                         def,
                         temp,
                         weather.is_frost,
-                        soil.moisture,
+                        available,
+                        air,
                         soil.fertility,
                         overripe,
                     );
@@ -293,11 +312,22 @@ pub fn tile_inspector_panel(
                         ui.colored_label(egui::Color32::RED, "  Frost today - not frost-tolerant!");
                     }
                     ui.label(format!(
-                        "  Moisture: {:.2} (ideal {:.2}-{:.2}) - {}",
-                        soil.moisture,
-                        def.ideal_moisture_range.0,
-                        def.ideal_moisture_range.1,
-                        moisture_status_label(breakdown.moisture_status)
+                        "  Available water: {:.2} (ideal {:.2}+) - {}",
+                        available,
+                        def.ideal_available_water,
+                        drought_status_label(breakdown.drought_status)
+                    ));
+                    ui.label(format!(
+                        "  Air in soil: {:.2} (ideal {:.2}+) - {}",
+                        air,
+                        def.ideal_air_porosity,
+                        waterlog_status_label(breakdown.waterlog_status)
+                    ));
+                    let et = soil::daily_et_mm(soil_def, Some((def, crop.current_stage)), temp);
+                    let days_left = (soil.water_mm - soil_def.wilting_mm()).max(0.0) / et.max(f32::EPSILON);
+                    ui.label(format!(
+                        "  Water use today: {:.1} mm (about {:.0} day(s) of water left)",
+                        et, days_left
                     ));
                     ui.label(format!(
                         "  Fertility: {:.2} (needs {:.2}) - {}",
@@ -336,22 +366,18 @@ fn enqueue(
     kind: ActionKind,
     crop_to_plant: Option<Handle<CropDef>>,
 ) {
-    enqueue_with_intensity(queue, next_id, tile, kind, crop_to_plant, 1.0);
+    enqueue_with_depth(queue, next_id, tile, kind, crop_to_plant, 0.0);
 }
 
-/// Phase 8 addition: lets a caller specify `water_intensity` (only
-/// meaningful for `ActionKind::Water` - see `PendingAction`'s doc
-/// comment). `enqueue` above is a thin wrapper defaulting to `1.0` so
-/// every existing call site (Till/Fertilize/Harvest/Clear/Plant/full
-/// Water) is unaffected; only the new "½ Water" button calls this
-/// directly.
-fn enqueue_with_intensity(
+/// Like `enqueue`, but with a water depth in mm (only meaningful for
+/// `ActionKind::Water` - see `PendingAction::water_depth_mm`).
+fn enqueue_with_depth(
     queue: &mut ActionQueue,
     next_id: &mut NextActionId,
     tile: Entity,
     kind: ActionKind,
     crop_to_plant: Option<Handle<CropDef>>,
-    water_intensity: f32,
+    water_depth_mm: f32,
 ) {
     let id = next_id.0;
     next_id.0 += 1;
@@ -360,7 +386,7 @@ fn enqueue_with_intensity(
         tile,
         kind,
         crop_to_plant,
-        water_intensity,
+        water_depth_mm,
     });
 }
 
@@ -373,6 +399,7 @@ pub fn action_queue_panel(
     mut queue: ResMut<ActionQueue>,
     mut next_id: ResMut<NextActionId>,
     mut crop_choice: Local<usize>,
+    mut water_depth: Local<Option<f32>>,
 ) {
     egui::SidePanel::left("action_queue").show(contexts.ctx_mut(), |ui| {
         ui.heading("Actions");
@@ -388,19 +415,20 @@ pub fn action_queue_panel(
                     enqueue(&mut queue, &mut next_id, t, ActionKind::Till, None);
                 }
             }
-            if ui.button("Water").clicked() {
-                if let Some(t) = tile {
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Water, None);
+            // Water depth in mm: 5 mm steps with 10/20/30 presets.
+            let depth = water_depth.get_or_insert(20.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(depth).range(5.0..=60.0).speed(5.0).suffix(" mm"));
+                for preset in [10.0, 20.0, 30.0] {
+                    if ui.small_button(format!("{preset:.0}")).clicked() {
+                        *depth = preset;
+                    }
                 }
-            }
-            // Phase 8 addition: a lighter watering option, added after
-            // playtesting showed a full Water action stacking with the
-            // same day's rain could overshoot straight past
-            // max_moisture. Queues the same ActionKind::Water, just at
-            // half WATER_ACTION_AMOUNT - see PendingAction::water_intensity.
-            if ui.button("\u{00BD} Water").clicked() {
+            });
+            *depth = (*depth / 5.0).round().max(1.0) * 5.0;
+            if ui.button(format!("Water {:.0} mm", *depth)).clicked() {
                 if let Some(t) = tile {
-                    enqueue_with_intensity(&mut queue, &mut next_id, t, ActionKind::Water, None, 0.5);
+                    enqueue_with_depth(&mut queue, &mut next_id, t, ActionKind::Water, None, *depth);
                 }
             }
             if ui.button("Fertilize").clicked() {
@@ -453,11 +481,8 @@ pub fn action_queue_panel(
                 ui.label("(empty)");
             }
             for action in &queue.pending {
-                // Phase 8: distinguish a half-strength Water entry in
-                // the FIFO display, otherwise it's indistinguishable
-                // from a full Water action once queued.
-                if action.kind == ActionKind::Water && action.water_intensity < 1.0 {
-                    ui.label(format!("#{} - Water (\u{00BD})", action.id));
+                if action.kind == ActionKind::Water {
+                    ui.label(format!("#{} - Water ({:.0} mm)", action.id, action.water_depth_mm));
                 } else {
                     ui.label(format!("#{} - {:?}", action.id, action.kind));
                 }

@@ -145,14 +145,20 @@ fn validate_crop_defs(
         if def.ideal_temp_range.0 < def.min_temp || def.ideal_temp_range.1 > def.max_temp {
             warn!("Crop '{}': ideal_temp_range falls outside min_temp/max_temp", label);
         }
-        if def.min_moisture > def.max_moisture {
+        if def.ideal_available_water < def.min_available_water {
             warn!(
-                "Crop '{}': min_moisture > max_moisture ({} > {})",
-                label, def.min_moisture, def.max_moisture
+                "Crop '{}': ideal_available_water ({}) is below min_available_water ({})",
+                label, def.ideal_available_water, def.min_available_water
             );
         }
-        if def.ideal_moisture_range.0 < def.min_moisture || def.ideal_moisture_range.1 > def.max_moisture {
-            warn!("Crop '{}': ideal_moisture_range falls outside min_moisture/max_moisture", label);
+        if def.ideal_air_porosity < def.min_air_porosity {
+            warn!(
+                "Crop '{}': ideal_air_porosity ({}) is below min_air_porosity ({})",
+                label, def.ideal_air_porosity, def.min_air_porosity
+            );
+        }
+        if def.daily_water_use_mm < 0.0 {
+            warn!("Crop '{}': daily_water_use_mm is negative", label);
         }
         let t = &def.quality_thresholds;
         if !(t.premium_max_stress < t.good_max_stress && t.good_max_stress < t.lethal_stress) {

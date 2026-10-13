@@ -823,9 +823,9 @@ window happens to be open isn't game state.
 
 ---
 
-## 6. Planned: Soil Definitions, Water Model, and Fields (not yet implemented)
+## 6. Soil Definitions, Water Model, and Fields (stages 1–4 implemented; fields not yet)
 
-*Status: design agreed in discussion, no code written yet. Sections 2–3 above still describe the code as it currently stands; this section describes where it is going and why. Phase numbers are deliberately unassigned. Every number below is a §5-style placeholder for playtesting.*
+*Status: stages 1–4 of §6.10 (soil definitions, water model, transpiration, soil distribution + soil-type overlay) are implemented in `src/soil/mod.rs`, `farm`, `crops` and `save`; stage 5 (fields, `TileOrField` targets) is not. Deviation from §6.1: `SoilRoster` is read synchronously with `std::fs` at plugin build rather than via an async asset loader, since tiles are spawned in `Startup` and need the soils immediately. Original status note: Sections 2–3 above still describe the code as it currently stands; this section describes where it is going and why. Phase numbers are deliberately unassigned. Every number below is a §5-style placeholder for playtesting.*
 
 **Why this is needed.** Three things in the current design are thin. `SoilType` only changes `fallow_regen_rate` (§2.3a), so soil is almost cosmetic. Moisture is one 0.0–1.0 number that crops compare against ranges, so soils can't differ in how much water they hold or how fast they lose it, and crops don't consume any water at all (`tick_growth` only reads `SoilState`; the only moisture inputs are rain, a flat evaporation constant and the `Water` action). And with a farm of thousands of tiles, single-tile actions are the wrong grain for the player. This section adds data-driven soils, a water model that distinguishes drought from waterlogging, crop transpiration, patchy soil layout, and persistent multi-tile fields.
 

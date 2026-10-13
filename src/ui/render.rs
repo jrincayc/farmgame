@@ -41,8 +41,9 @@ use bevy_egui::EguiContexts;
 use crate::crops::{CropDef, PlantedCrop};
 use crate::farm::{FarmConfig, SoilState, Tile, TileMap};
 
-use super::sprites::{soil_tint, CropSpriteRoster, SoilSpriteRoster};
-use super::SelectedTile;
+use super::sprites::{soil_overlay_color, soil_tint, CropSpriteRoster, SoilSpriteRoster};
+use super::{SelectedTile, ShowSoilOverlay};
+use crate::soil::SoilRoster;
 
 /// World-space size of one tile's square, plus a small gap so tiles
 /// read as a grid rather than a solid block. Both placeholders, same
@@ -418,16 +419,23 @@ pub fn sync_tile_visuals(
     soil_sprites: Res<SoilSpriteRoster>,
     crop_sprites: Res<CropSpriteRoster>,
     crop_defs: Res<Assets<CropDef>>,
+    soils: Res<SoilRoster>,
+    overlay: Res<ShowSoilOverlay>,
 ) {
     for (soil, planted, layers) in &tiles {
-        // --- Soil base: texture by SoilType, tinted by moisture/fertility ---
+        // --- Soil base: texture by soil, tinted by water/fertility (or flat soil-type colour) ---
         if let Ok(mut sprite) = sprites.get_mut(layers.soil) {
-            if let Some(handle) = soil_sprites.by_type.get(&soil.soil_type) {
+            if let Some(handle) = soil_sprites.by_index.get(soil.soil as usize) {
                 if sprite.image != *handle {
                     sprite.image = handle.clone();
                 }
             }
-            sprite.color = soil_tint(soil.fertility, soil.moisture);
+            let soil_def = soils.get(soil.soil as usize);
+            sprite.color = if overlay.0 {
+                soil_overlay_color(soil_def.texture)
+            } else {
+                soil_tint(soil.fertility, soil_def.available(soil.water_mm))
+            };
         }
 
         // --- Tilled overlay: visibility only, image is set once at spawn ---

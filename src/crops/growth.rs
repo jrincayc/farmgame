@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 use crate::climate::{Region, WeatherToday};
 use crate::farm::SoilState;
+use crate::soil::SoilRoster;
 use crate::sim_order::DayAdvanceOrder;
 use crate::time::{Calendar, DayAdvanced};
 
@@ -121,6 +122,7 @@ fn tick_growth(
     region: Res<Region>,
     calendar: Res<Calendar>,
     weather: Res<WeatherToday>,
+    soils: Res<SoilRoster>,
     crop_defs: Res<Assets<CropDef>>,
     mut crops: Query<(&mut PlantedCrop, &SoilState)>,
 ) {
@@ -141,6 +143,10 @@ fn tick_growth(
             continue;
         };
 
+        let soil_def = soils.get(soil.soil as usize);
+        let available = soil_def.available(soil.water_mm);
+        let air = soil_def.air(soil.water_mm);
+
         for &day in &advanced_days {
             if crop.dead {
                 break;
@@ -159,7 +165,8 @@ fn tick_growth(
                 def,
                 temp,
                 weather.is_frost,
-                soil.moisture,
+                available,
+                air,
                 soil.fertility,
                 overripe,
             );

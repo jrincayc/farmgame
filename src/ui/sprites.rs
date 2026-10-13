@@ -26,15 +26,13 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::crops::{CropDef, CropRoster};
-use crate::farm::SoilType;
+use crate::soil::SoilRoster;
 
-/// One `Handle<Image>` per `SoilType`, plus the tilled-furrow overlay.
-/// Loaded once at Startup — unlike crop sprites, soil types are a fixed
-/// enum (not data-driven), so there's no discovery step needed, just a
-/// fixed set of paths.
+/// One `Handle<Image>` per soil in the `SoilRoster` (same indexing, each
+/// from its `SoilDef::sprite` path), plus the tilled-furrow overlay.
 #[derive(Resource, Debug, Clone)]
 pub struct SoilSpriteRoster {
-    pub by_type: HashMap<SoilType, Handle<Image>>,
+    pub by_index: Vec<Handle<Image>>,
     pub tilled_overlay: Handle<Image>,
 }
 
@@ -57,13 +55,10 @@ impl CropSpriteRoster {
 /// `render::spawn_tile_visuals` that reads `SoilSpriteRoster` is
 /// `Update`-scheduled, and all `Startup` systems finish before the
 /// first `Update` pass runs.
-pub fn load_soil_sprites(asset_server: Res<AssetServer>, mut commands: Commands) {
-    let mut by_type = HashMap::new();
-    by_type.insert(SoilType::Sandy, asset_server.load("soil/sandy.png"));
-    by_type.insert(SoilType::Loamy, asset_server.load("soil/loamy.png"));
-    by_type.insert(SoilType::Clay, asset_server.load("soil/clay.png"));
+pub fn load_soil_sprites(asset_server: Res<AssetServer>, soils: Res<SoilRoster>, mut commands: Commands) {
+    let by_index = soils.defs.iter().map(|d| asset_server.load(d.sprite.clone())).collect();
     let tilled_overlay = asset_server.load("soil/tilled_overlay.png");
-    commands.insert_resource(SoilSpriteRoster { by_type, tilled_overlay });
+    commands.insert_resource(SoilSpriteRoster { by_index, tilled_overlay });
 }
 
 /// Reacts to a `CropDef` asset finishing load (same event pattern
@@ -121,9 +116,9 @@ pub fn load_crop_sprites(
 /// tinting into mush - a §5-style placeholder like the sim's other
 /// unvalidated tuning constants, worth revisiting once actually seen
 /// in-game.
-pub fn soil_tint(fertility: f32, moisture: f32) -> Color {
+pub fn soil_tint(fertility: f32, available_water: f32) -> Color {
     let fert = fertility.clamp(0.0, 1.0);
-    let moist = moisture.clamp(0.0, 1.0);
+    let moist = available_water.clamp(0.0, 1.0);
 
     let gray_amount = (1.0 - fert) * 0.45;
     let wet_amount = moist * 0.25;
@@ -133,4 +128,12 @@ pub fn soil_tint(fertility: f32, moisture: f32) -> Color {
     let b = 1.0 - gray_amount * 0.35 + wet_amount * 0.25;
 
     Color::srgb(r.clamp(0.3, 1.0), g.clamp(0.3, 1.0), b.clamp(0.3, 1.0))
+}
+
+/// Flat colour for the soil-type overlay (design doc §6.7), derived from a
+/// soil's `texture` value (coarse yellow -> fine red) so a new soil type
+/// needs no code change.
+pub fn soil_overlay_color(texture: f32) -> Color {
+    let t = texture.clamp(0.0, 1.0);
+    Color::srgb(0.95 - 0.15 * t, 0.85 - 0.65 * t, 0.25 - 0.1 * t)
 }

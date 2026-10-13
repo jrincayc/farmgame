@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::farm::SoilState;
 use crate::sim_order::DayAdvanceOrder;
+use crate::soil::SoilRoster;
 use crate::time::{Calendar, DayAdvanced};
 
 use super::crop_def::{quality_grade, yield_amount, CropDef};
@@ -55,18 +56,9 @@ pub struct PendingAction {
     pub kind: ActionKind,
     /// Only relevant for `ActionKind::Plant`.
     pub crop_to_plant: Option<Handle<CropDef>>,
-    /// **Phase 8 addition.** Multiplier on `WATER_ACTION_AMOUNT` for an
-    /// `ActionKind::Water` action; ignored for every other kind. `1.0`
-    /// is the original full-strength watering (still the default
-    /// button); `0.5` backs the new "½ Water" button, added after
-    /// playtesting turned up watering-into-already-wet-soil overshoot
-    /// (a queued Water landing the same day as rain, stacking past
-    /// `max_moisture`). Giving the player a lighter option is the
-    /// direct fix for that; see also the softened absorption curve in
-    /// `resolve_action`'s `Water` arm and `farm::degrade_soil`'s
-    /// rainfall term, which reduce (but don't eliminate) the same
-    /// overshoot even at full intensity.
-    pub water_intensity: f32,
+    /// Depth of water applied by an `ActionKind::Water` action, in mm
+    /// (design doc §6.6); ignored for every other kind.
+    pub water_depth_mm: f32,
 }
 
 #[derive(Resource, Default)]
@@ -77,11 +69,9 @@ pub struct ActionQueue {
 #[derive(Resource, Default)]
 pub struct NextActionId(pub u64);
 
-/// Amount `SoilState.moisture`/`fertility` are bumped by a single Water
-/// or Fertilize action, clamped to [0,1] afterward. §5-style
-/// placeholders - real numbers are a playtesting question, same as
-/// equipment capacities.
-const WATER_ACTION_AMOUNT: f32 = 0.3;
+/// Amount `SoilState.fertility` is bumped by a single Fertilize action,
+/// clamped to [0,1] afterward. §5-style placeholder - a playtesting
+/// question, same as equipment capacities.
 const FERTILIZE_ACTION_AMOUNT: f32 = 0.2;
 
 pub struct CropsQueuePlugin;
@@ -107,6 +97,7 @@ fn process_action_queue(
     mut events: EventReader<DayAdvanced>,
     mut queue: ResMut<ActionQueue>,
     equipment: Res<Equipment>,
+    soils: Res<SoilRoster>,
     mut tiles: Query<(&mut SoilState, Option<&PlantedCrop>)>,
     mut wallet: ResMut<Wallet>,
     mut inventory: ResMut<Inventory>,
@@ -135,6 +126,7 @@ fn process_action_queue(
             resolve_action(
                 &action,
                 &mut tiles,
+                &soils,
                 &mut wallet,
                 &mut inventory,
                 &crop_defs,
@@ -157,6 +149,7 @@ fn process_action_queue(
 fn resolve_action(
     action: &PendingAction,
     tiles: &mut Query<(&mut SoilState, Option<&PlantedCrop>)>,
+    soils: &SoilRoster,
     wallet: &mut Wallet,
     inventory: &mut Inventory,
     crop_defs: &Assets<CropDef>,
@@ -174,16 +167,10 @@ fn resolve_action(
         }
 
         ActionKind::Water => {
-            // Phase 8: softened from a flat additive bump to an
-            // asymptotic approach toward saturation (moisture == 1.0) -
-            // real soil absorbs less as it gets wetter, the rest is
-            // runoff. `water_intensity` (1.0 full / 0.5 "½ Water") lets
-            // the player choose a lighter dose on top of that; see
-            // PendingAction::water_intensity's doc comment for why this
-            // was added. Mirrors the same softening applied to rainfall
-            // in `farm::degrade_soil`.
-            let raw = WATER_ACTION_AMOUNT * action.water_intensity;
-            soil.moisture = (soil.moisture + raw * (1.0 - soil.moisture)).clamp(0.0, 1.0);
+            // Applied like rain: capped at saturation, the excess is
+            // lost. An over-application shows up as waterlogging the
+            // same day and drains on the next one.
+            soil.water_mm = soils.get(soil.soil as usize).add_water(soil.water_mm, action.water_depth_mm);
         }
 
         ActionKind::Fertilize => {
@@ -247,7 +234,12 @@ fn resolve_action(
             }
 
             let quality = quality_grade(crop.worst_single_day_stress, &def.quality_thresholds);
-            let amount = yield_amount(crop.cumulative_stress, soil.fertility, soil.moisture, def.base_yield);
+            let amount = yield_amount(
+                crop.cumulative_stress,
+                soil.fertility,
+                soils.get(soil.soil as usize).available(soil.water_mm),
+                def.base_yield,
+            );
             inventory.add(def.id.clone(), amount, quality);
             commands.entity(action.tile).remove::<PlantedCrop>();
         }

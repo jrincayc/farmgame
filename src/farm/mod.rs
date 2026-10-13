@@ -11,10 +11,11 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::climate::WeatherToday;
+use crate::climate::{Region, WeatherToday};
 use crate::crops::{CropDef, PlantedCrop};
 use crate::sim_order::DayAdvanceOrder;
-use crate::time::DayAdvanced;
+use crate::soil::{self, SoilRoster, MAX_DAILY_RAIN_MM};
+use crate::time::{Calendar, DayAdvanced};
 
 /// Farm dimensions, read at world-gen time rather than compiled in
 /// (design doc §2.3, requirements §4.2/§9), so a future player-facing
@@ -29,6 +30,14 @@ use crate::time::DayAdvanced;
 pub struct FarmConfig {
     pub width: u32,
     pub height: u32,
+    /// Seed for the soil layout noise (design doc §6.7). Defaulted on
+    /// load so saves written before it existed still parse.
+    #[serde(default = "default_soil_seed")]
+    pub seed: u64,
+}
+
+fn default_soil_seed() -> u64 {
+    0xFA2A_5EED
 }
 
 impl FarmConfig {
@@ -41,6 +50,7 @@ impl FarmConfig {
         Self {
             width: 64,
             height: 64,
+            seed: default_soil_seed(),
         }
     }
 }
@@ -56,47 +66,24 @@ pub struct Tile {
     pub coord: IVec2,
 }
 
-/// **Phase 7 addition:** `Serialize`/`Deserialize` so a per-tile save
-/// entry (`save::SavedTile`) can embed this directly rather than
-/// needing its own mirror struct — every field here is a plain value
-/// (no `Entity`/`Handle`), unlike `PlantedCrop`, which does need a
-/// mirror (`save::SavedCrop`) because of its `Handle<CropDef>`.
-#[derive(Component, Debug, Clone, Serialize, Deserialize)]
+/// Per-tile soil state. Saves use `save::SavedTile` rather than
+/// serializing this directly, since the soil is stored there by string id.
+#[derive(Component, Debug, Clone)]
 pub struct SoilState {
     /// 0.0-1.0.
     pub fertility: f32,
-    /// 0.0-1.0.
-    pub moisture: f32,
-    pub soil_type: SoilType,
+    /// Water depth in the root zone, in mm (design doc §6.2), between
+    /// the soil's wilting point and saturation.
+    pub water_mm: f32,
+    /// Index into `SoilRoster`.
+    pub soil: u8,
     /// **Added Phase 4.** Whether the tile has been freshly tilled and
     /// is ready to plant. Set by `ActionKind::Till`; consumed (cleared)
     /// by a successful `ActionKind::Plant` — a field needs re-tilling
     /// between crops, not just once ever, which gives Till a real,
     /// recurring throughput role (requirements §4.6a) rather than a
-    /// one-time formality. Not part of the original Phase 3 design; the
-    /// design doc's §2.3 `SoilState` struct is updated to match.
+    /// one-time formality.
     pub tilled: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SoilType {
-    Sandy,
-    Loamy,
-    Clay,
-}
-
-impl SoilType {
-    /// Fraction of the gap to `FALLOW_FERTILITY_BASELINE` closed per day
-    /// while a tile sits empty (design doc §2.3a). Placeholder like the
-    /// other tunables flagged in design doc §5 — Loamy regenerates
-    /// fastest, Sandy slowest, per the design doc's own example.
-    pub fn fallow_regen_rate(self) -> f32 {
-        match self {
-            SoilType::Loamy => 0.05,
-            SoilType::Clay => 0.03,
-            SoilType::Sandy => 0.015,
-        }
-    }
 }
 
 /// Baseline fertility fallow tiles drift toward (design doc §2.3a's
@@ -104,16 +91,6 @@ impl SoilType {
 /// tiles, since a not-yet-worked field settling at its own equilibrium
 /// is the natural starting point.
 const FALLOW_FERTILITY_BASELINE: f32 = 0.6;
-
-/// Fraction of a day's rolled rainfall that actually reaches soil
-/// moisture at *zero* current moisture (the rest is runoff/etc.) - see
-/// the Phase 8 softening note on `degrade_soil` below for how this
-/// scales down as the tile gets wetter. How much moisture evaporates on
-/// a dry day, regardless of rainfall. Both placeholders (design doc §5)
-/// — real numbers are a playtesting question, same as the fertility
-/// regen rates above.
-const RAINFALL_TO_MOISTURE: f32 = 0.8;
-const DAILY_EVAPORATION: f32 = 0.03;
 
 /// Maps a farm coordinate to its tile entity. A plain `HashMap` is
 /// explicitly fine at "a few thousand tiles" scale (design doc §5) —
@@ -132,6 +109,7 @@ impl Plugin for FarmPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FarmConfig>()
             .init_resource::<TileMap>()
+            .insert_resource(SoilRoster::load_from_dir(soil::SOILS_DIR))
             .add_systems(Startup, spawn_tiles)
             .add_systems(Update, degrade_soil.in_set(DayAdvanceOrder::Farm));
     }
@@ -152,7 +130,7 @@ impl Plugin for FarmPlugin {
 /// dimension-clamping/soil-assignment logic — the whole point being
 /// that grid construction only exists in one place, called from two
 /// contexts (Startup, and a save load).
-pub fn spawn_tile_grid(commands: &mut Commands, config: &FarmConfig, tile_map: &mut TileMap) {
+pub fn spawn_tile_grid(commands: &mut Commands, config: &FarmConfig, tile_map: &mut TileMap, soils: &SoilRoster) {
     let width = config
         .width
         .clamp(FarmConfig::MIN_DIMENSION, FarmConfig::MAX_DIMENSION);
@@ -160,16 +138,19 @@ pub fn spawn_tile_grid(commands: &mut Commands, config: &FarmConfig, tile_map: &
         .height
         .clamp(FarmConfig::MIN_DIMENSION, FarmConfig::MAX_DIMENSION);
 
+    let soil_map = soil::generate_soil_map(config.seed, width, height, soils);
+
     for y in 0..height {
         for x in 0..width {
             let coord = IVec2::new(x as i32, y as i32);
+            let soil_index = soil_map[(y * width + x) as usize];
             let entity = commands
                 .spawn((
                     Tile { coord },
                     SoilState {
                         fertility: FALLOW_FERTILITY_BASELINE,
-                        moisture: 0.4,
-                        soil_type: starting_soil_type(coord),
+                        water_mm: soils.get(soil_index as usize).field_capacity_mm(),
+                        soil: soil_index,
                         tilled: false,
                     },
                 ))
@@ -203,8 +184,13 @@ pub fn despawn_all_tiles(commands: &mut Commands, tile_map: &mut TileMap, tiles:
 /// its own min/max, in case something inserts an out-of-range config
 /// before this runs), each with a `Tile` (coordinate) and `SoilState`
 /// component, and records it in `TileMap` for coordinate lookup.
-fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: ResMut<TileMap>) {
-    spawn_tile_grid(&mut commands, &config, &mut tile_map);
+fn spawn_tiles(
+    mut commands: Commands,
+    config: Res<FarmConfig>,
+    mut tile_map: ResMut<TileMap>,
+    soils: Res<SoilRoster>,
+) {
+    spawn_tile_grid(&mut commands, &config, &mut tile_map, &soils);
 
     info!(
         "Spawned {} x {} = {} farm tiles",
@@ -214,93 +200,60 @@ fn spawn_tiles(mut commands: Commands, config: Res<FarmConfig>, mut tile_map: Re
     );
 }
 
-/// MVP starting soil layout: deterministic but varied, so the farm
-/// isn't mechanically uniform even before any player action (tilling,
-/// crop rotation) has happened. A coordinate-hash split rather than a
-/// real noise function — good enough until there's an actual reason
-/// (e.g. a soil-quality minimap, or hand-authored regions) to want
-/// something spatially smoother/clustered.
-fn starting_soil_type(coord: IVec2) -> SoilType {
-    match (coord.x.wrapping_add(coord.y.wrapping_mul(3))).rem_euclid(3) {
-        0 => SoilType::Sandy,
-        1 => SoilType::Loamy,
-        _ => SoilType::Clay,
-    }
-}
-
 /// Reacts to `DayAdvanced` (design doc §1.1: farm runs after climate,
-/// since moisture reacts to the day's already-rolled rainfall). Drifts
-/// fallow-tile fertility toward `FALLOW_FERTILITY_BASELINE` and applies
-/// the day's rainfall/evaporation to moisture.
+/// since soil water reacts to the day's already-rolled rainfall). Drifts
+/// fallow-tile fertility toward `FALLOW_FERTILITY_BASELINE` and runs the
+/// daily water balance (design doc §6.2): rain, drainage, evaporation,
+/// transpiration, then a floor at the wilting point.
 ///
-/// **Phase 4: the planted-tile fertility branch is now implemented,**
-/// closing the gap Phase 3 explicitly left open (its scope note said
-/// every tile was treated as fallow since `PlantedCrop`/`CropDef`
-/// didn't exist yet). While a tile has a `PlantedCrop`, fertility now
-/// changes by that crop's `fertility_impact_per_day` instead of
+/// While a tile has a `PlantedCrop`, fertility changes by that crop's
+/// `fertility_impact_per_day` (negated: positive drains) instead of
 /// drifting toward the fallow baseline.
 ///
-/// **Sign-convention bug caught while wiring this up:** the design
-/// doc's own field comment on `fertility_impact_per_day` says "positive
-/// drains soil, negative (legumes etc.) replenishes it" — but §2.3a's
-/// `degrade_soil` pseudocode *added* `fertility_impact_per_day`
-/// directly to `soil.fertility` with no negation. Fixed here by
-/// negating: `delta = -fertility_impact_per_day`.
-///
-/// **Phase 8: rainfall's moisture contribution is now softened,
-/// asymptotic toward saturation rather than a flat additive term.**
-/// Playtesting turned up moisture whiplash - queuing a Water action the
-/// same day it rained could stack two flat additions and blow straight
-/// past `max_moisture` into an over-watered failure state, with no way
-/// for the player to have anticipated it. Real soil absorbs less as it
-/// gets wetter (the rest runs off), so `rain_contribution` now scales by
-/// `(1.0 - soil.moisture)` - the wetter the tile already is, the less a
-/// given day's rain adds. `RAINFALL_TO_MOISTURE` remains the rate at
-/// *zero* moisture; it decays smoothly from there rather than being a
-/// flat rate that only stops via the post-hoc `.clamp(0.0, 1.0)`.
-/// Evaporation is deliberately left as a flat subtraction — drying out
-/// wasn't the thing that needed softening, and keeping it flat is what
-/// lets moisture actually recover instead of asymptotically clinging
-/// just under the ceiling forever. `crops::queue::resolve_action`'s
-/// `ActionKind::Water` handler applies the same `(1.0 - moisture)`
-/// softening to the watering action itself, for the same reason.
-///
-/// If more than one `DayAdvanced` fires in the same frame (the timer's
-/// stutter-catchup case — see time module), this applies once per
-/// event, reusing whatever `WeatherToday` holds at the time this system
-/// runs (climate's own multi-event handling has the same "only the
-/// final day's roll survives" limitation, so this doesn't introduce a
-/// new inconsistency, just inherits an existing, documented one).
+/// Each `DayAdvanced` event is processed with its own day's temperature
+/// (as `tick_growth` does), so a multi-day catch-up gets each day's own
+/// evapotranspiration. Rainfall is the one `WeatherToday` roll that
+/// survives (see `climate`).
 fn degrade_soil(
     mut events: EventReader<DayAdvanced>,
     weather: Res<WeatherToday>,
+    region: Res<Region>,
+    calendar: Res<Calendar>,
+    soils: Res<SoilRoster>,
     crop_defs: Res<Assets<CropDef>>,
     mut tiles: Query<(&mut SoilState, Option<&PlantedCrop>)>,
 ) {
-    let day_count = events.read().count();
-    if day_count == 0 {
+    let temps: Vec<f32> = events
+        .read()
+        .map(|e| {
+            let year_length = calendar.year_length.max(1);
+            region.base_temp_curve.temp_on(e.new_day % year_length, year_length)
+        })
+        .collect();
+    if temps.is_empty() {
         return;
     }
+    let rain_mm = weather.rainfall * MAX_DAILY_RAIN_MM;
 
     for (mut soil, planted) in &mut tiles {
-        for _ in 0..day_count {
-            let fertility_delta = match planted {
-                Some(crop) => crop_defs
-                    .get(&crop.def)
-                    .map(|def| -def.fertility_impact_per_day)
-                    .unwrap_or(0.0),
-                None => {
-                    let regen_rate = soil.soil_type.fallow_regen_rate();
-                    (FALLOW_FERTILITY_BASELINE - soil.fertility) * regen_rate
-                }
+        let soil_def = soils.get(soil.soil as usize);
+        let crop = planted.and_then(|p| crop_defs.get(&p.def).map(|def| (p, def)));
+
+        for &temp in &temps {
+            let fertility_delta = match crop {
+                Some((_, def)) => -def.fertility_impact_per_day,
+                None if planted.is_some() => 0.0,
+                None => (FALLOW_FERTILITY_BASELINE - soil.fertility) * soil_def.fallow_regen_rate,
             };
             soil.fertility = (soil.fertility + fertility_delta).clamp(0.0, 1.0);
 
-            // Phase 8: softened - see this function's doc comment.
-            let rain_contribution =
-                weather.rainfall * RAINFALL_TO_MOISTURE * (1.0 - soil.moisture);
-            let moisture_delta = rain_contribution - DAILY_EVAPORATION;
-            soil.moisture = (soil.moisture + moisture_delta).clamp(0.0, 1.0);
+            // Dead crops transpire nothing.
+            let living = crop.filter(|(p, _)| !p.dead).map(|(p, def)| (def, p.current_stage));
+
+            let mut water = soil_def.add_water(soil.water_mm, rain_mm);
+            water = soil_def.drain(water);
+            water -= soil::daily_et_mm(soil_def, living, temp);
+            soil.water_mm = water.max(soil_def.wilting_mm());
         }
     }
 }
@@ -338,6 +291,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 40,
             height: 35,
+            ..default()
         });
         app.update();
 
@@ -349,6 +303,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 1,
             height: FarmConfig::MAX_DIMENSION + 500,
+            ..default()
         });
         app.update();
 
@@ -364,6 +319,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,
+            ..default()
         });
         app.update();
 
@@ -375,6 +331,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,
+            ..default()
         });
         app.update();
 
@@ -401,6 +358,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,
+            ..default()
         });
         app.update();
 
@@ -427,6 +385,7 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 1,
             height: 1,
+            ..default()
         });
         app.update();
 
@@ -452,24 +411,26 @@ mod tests {
     }
 
     #[test]
-    fn moisture_stays_within_bounds_over_many_days() {
-        let mut app = test_app(FarmConfig {
-            width: 1,
-            height: 1,
-        });
+    fn water_stays_between_wilting_point_and_saturation() {
+        let mut app = test_app(FarmConfig::default());
         app.update();
 
         for _ in 0..100 {
             app.world_mut().send_event(StepDayRequested);
             app.update();
+            let soils = app.world().resource::<SoilRoster>().clone();
+            for soil in all_soil(&mut app) {
+                let def = soils.get(soil.soil as usize);
+                assert!(
+                    soil.water_mm >= def.wilting_mm() - 1e-3 && soil.water_mm <= def.saturation_mm() + 1e-3,
+                    "water {} escaped [{}, {}] for {}",
+                    soil.water_mm,
+                    def.wilting_mm(),
+                    def.saturation_mm(),
+                    def.id
+                );
+            }
         }
-
-        let soil = &all_soil(&mut app)[0];
-        assert!(
-            (0.0..=1.0).contains(&soil.moisture),
-            "moisture escaped [0,1]: {}",
-            soil.moisture
-        );
     }
 
     #[test]
@@ -477,47 +438,98 @@ mod tests {
         let mut app = test_app(FarmConfig {
             width: 33,
             height: 33,
+            ..default()
         });
         app.update();
 
-        let types: HashSet<SoilType> = all_soil(&mut app).iter().map(|s| s.soil_type).collect();
-        assert!(
-            types.len() > 1,
-            "expected varied starting soil types across a small farm, got {types:?}"
-        );
+        let types: HashSet<u8> = all_soil(&mut app).iter().map(|s| s.soil).collect();
+        assert!(types.len() > 1, "expected varied starting soil types, got {types:?}");
     }
 
-    /// **Phase 8 regression test:** the softened rain-absorption curve
-    /// should mean a single day of rainfall on already-near-max
-    /// moisture adds noticeably less than the old flat
-    /// `RAINFALL_TO_MOISTURE` rate would have - guards against
-    /// accidentally reverting to the flat additive formula.
+    /// Rain on saturated soil adds nothing: the excess is runoff, and the
+    /// day's drainage/evaporation can only take water away.
     #[test]
-    fn rain_contribution_shrinks_as_moisture_approaches_saturation() {
-        let mut app = test_app(FarmConfig {
-            width: 1,
-            height: 1,
-        });
+    fn rain_on_saturated_soil_adds_nothing() {
+        let mut app = test_app(FarmConfig::default());
         app.update();
-
+        let soils = app.world().resource::<SoilRoster>().clone();
         {
             let mut query = app.world_mut().query::<&mut SoilState>();
             for mut soil in query.iter_mut(app.world_mut()) {
-                soil.moisture = 0.95;
+                soil.water_mm = soils.get(soil.soil as usize).saturation_mm();
             }
         }
-        let before = all_soil(&mut app)[0].moisture;
 
         app.world_mut().send_event(StepDayRequested);
         app.update();
 
-        let after = all_soil(&mut app)[0].moisture;
-        // At 95% moisture, even full rainfall (rainfall=1.0) should add
-        // at most RAINFALL_TO_MOISTURE * (1.0 - 0.95) = 0.04 before
-        // evaporation - nowhere near the old flat-rate jump.
-        assert!(
-            after - before < 0.05,
-            "expected a small increase near saturation, before={before} after={after}"
-        );
+        for soil in all_soil(&mut app) {
+            assert!(soil.water_mm <= soils.get(soil.soil as usize).saturation_mm() + 1e-3);
+        }
+    }
+
+    #[test]
+    fn dead_crops_use_no_water() {
+        use crate::crops::{CropDef, GrowthStage, QualityThresholds};
+
+        let mut app = test_app(FarmConfig::default());
+        app.update();
+
+        let handle = app.world_mut().resource_mut::<Assets<CropDef>>().add(CropDef {
+            id: "test".into(),
+            name: "test".into(),
+            growth_stages: vec![GrowthStage {
+                name: "growing".into(),
+                duration_days: 10,
+                water_use_factor: 1.0,
+            }],
+            min_temp: -50.0,
+            max_temp: 50.0,
+            ideal_temp_range: (-50.0, 50.0),
+            frost_tolerant: true,
+            min_available_water: 0.0,
+            ideal_available_water: 0.0,
+            min_air_porosity: 0.0,
+            ideal_air_porosity: 0.0,
+            daily_water_use_mm: 10.0,
+            fertility_requirement: 0.0,
+            base_yield: 1,
+            sell_price: 1,
+            seed_cost: 1,
+            quality_thresholds: QualityThresholds {
+                premium_max_stress: 1.0,
+                good_max_stress: 2.0,
+                lethal_stress: 100.0,
+            },
+            optimal_harvest_window_days: 1,
+            overripe_stress_per_day: 0.0,
+            fertility_impact_per_day: 0.0,
+        });
+
+        let (alive, dead) = {
+            let tile_map = app.world().resource::<TileMap>();
+            (tile_map.tiles[&IVec2::new(0, 0)], tile_map.tiles[&IVec2::new(1, 0)])
+        };
+        for (entity, is_dead) in [(alive, false), (dead, true)] {
+            let mut soil = app.world_mut().get_mut::<SoilState>(entity).unwrap();
+            soil.soil = 1;
+            soil.water_mm = 120.0;
+            app.world_mut().entity_mut(entity).insert(PlantedCrop {
+                def: handle.clone(),
+                planted_day: 0,
+                current_stage: 0,
+                days_in_stage: 0,
+                cumulative_stress: 0.0,
+                worst_single_day_stress: 0.0,
+                dead: is_dead,
+            });
+        }
+
+        app.world_mut().send_event(StepDayRequested);
+        app.update();
+
+        let water = |app: &App, e: Entity| app.world().get::<SoilState>(e).unwrap().water_mm;
+        let (a, d) = (water(&app, alive), water(&app, dead));
+        assert!(d > a, "dead crop should keep more water than a living one (alive {a}, dead {d})");
     }
 }

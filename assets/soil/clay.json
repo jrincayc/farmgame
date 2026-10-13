@@ -1,0 +1,12 @@
+{
+    "id": "clay",
+    "name": "Clay",
+    "sprite": "soil/clay.png",
+    "wilting_point": 0.25,
+    "field_capacity": 0.38,
+    "saturation": 0.50,
+    "drainage_rate": 0.08,
+    "evaporation_mm_per_day": 0.7,
+    "fallow_regen_rate": 0.03,
+    "texture": 1.0
+}

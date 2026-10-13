@@ -24,17 +24,20 @@ pub struct CropDef {
     pub ideal_temp_range: (f32, f32),
     pub frost_tolerant: bool,
 
-    /// **Schema change (Phase 4):** the requirements doc's original
-    /// `water_requirement: f32` schema only modeled under-watering. Per
-    /// design feedback, over-watering is a real failure mode too (root
-    /// rot, waterlogging) — so moisture now mirrors the temperature
-    /// fields exactly: an absolute viable range (`min_moisture`/
-    /// `max_moisture`) and a narrower `ideal_moisture_range` for
-    /// full-quality growth. Values are on `SoilState.moisture`'s 0.0-1.0
-    /// scale, not an absolute water quantity.
-    pub min_moisture: f32,
-    pub max_moisture: f32,
-    pub ideal_moisture_range: (f32, f32),
+    /// **Water schema (design doc §6.4):** two axes derived from the
+    /// soil's water depth (`soil::SoilDef::available` / `air`), so crop
+    /// data stays soil-independent.
+    ///
+    /// Drought axis, 0..1 plant-available water: below `min` is severe,
+    /// below `ideal` is mildly stressful.
+    pub min_available_water: f32,
+    pub ideal_available_water: f32,
+    /// Waterlogging axis, air-filled porosity (volumetric fraction).
+    pub min_air_porosity: f32,
+    pub ideal_air_porosity: f32,
+    /// Transpiration at 25 °C in mm/day, scaled per stage by
+    /// `GrowthStage::water_use_factor`.
+    pub daily_water_use_mm: f32,
 
     pub fertility_requirement: f32,
 
@@ -66,6 +69,13 @@ pub struct QualityThresholds {
 pub struct GrowthStage {
     pub name: String,
     pub duration_days: u32,
+    /// Multiplier on `daily_water_use_mm` in this stage.
+    #[serde(default = "default_water_use_factor")]
+    pub water_use_factor: f32,
+}
+
+fn default_water_use_factor() -> f32 {
+    1.0
 }
 
 /// Determines produce quality from the worst single day of stress a
@@ -122,7 +132,7 @@ pub fn quality_grade(worst_single_day_stress: f32, thresholds: &QualityThreshold
 /// independent factors, both clamped to [0,1] before multiplying:
 /// - `stress_factor`: chronically stressed crops yield less, tapering to
 ///   zero at `YIELD_STRESS_DIVISOR` total accumulated stress.
-/// - `soil_factor`: the tile's fertility/moisture *at harvest time*
+/// - `soil_factor`: the tile's fertility/available water *at harvest time*
 ///   contributes, but is floored at `MIN_SOIL_YIELD_FACTOR` rather than
 ///   being able to zero out yield entirely on its own — soil quality
 ///   should matter, but a crop that otherwise grew perfectly on
@@ -133,9 +143,9 @@ pub fn quality_grade(worst_single_day_stress: f32, thresholds: &QualityThreshold
 const YIELD_STRESS_DIVISOR: f32 = 200.0;
 const MIN_SOIL_YIELD_FACTOR: f32 = 0.3;
 
-pub fn yield_amount(cumulative_stress: f32, fertility: f32, moisture: f32, base_yield: u32) -> u32 {
+pub fn yield_amount(cumulative_stress: f32, fertility: f32, available_water: f32, base_yield: u32) -> u32 {
     let stress_factor = (1.0 - cumulative_stress / YIELD_STRESS_DIVISOR).clamp(0.0, 1.0);
-    let soil_factor = ((fertility + moisture) / 2.0).clamp(MIN_SOIL_YIELD_FACTOR, 1.0);
+    let soil_factor = ((fertility + available_water) / 2.0).clamp(MIN_SOIL_YIELD_FACTOR, 1.0);
     ((base_yield as f32) * stress_factor * soil_factor).round() as u32
 }
 
@@ -182,7 +192,8 @@ const OUTSIDE_IDEAL_STRESS: f32 = 0.25;
 const FERTILITY_DEFICIT_STRESS: f32 = 0.25;
 /// Flat stress hit on a frost day for a non-frost-tolerant crop.
 const FROST_STRESS: f32 = 6.0;
-/// Converts a moisture deficit/excess (0.0-1.0 scale) into stress units
+/// Converts a drought deficit (0.0-1.0 available-water scale) or a
+/// waterlogging deficit (normalized by its threshold) into stress units
 /// comparable to temperature stress (degrees C, much larger swings).
 const MOISTURE_STRESS_SCALE: f32 = 10.0;
 
@@ -198,8 +209,12 @@ pub struct StressBreakdown {
     pub temp_stress: f32,
     pub frost_hit: bool,
     pub frost_stress: f32,
-    pub moisture_status: RangeStatus,
-    pub moisture_stress: f32,
+    /// Drought axis; only `BelowMin`, `BelowIdeal` or `Ideal`.
+    pub drought_status: RangeStatus,
+    pub drought_stress: f32,
+    /// Waterlogging axis; only `BelowMin`, `BelowIdeal` or `Ideal`.
+    pub waterlog_status: RangeStatus,
+    pub waterlog_stress: f32,
     pub fertility_ok: bool,
     pub fertility_stress: f32,
     pub overripe_days: u32,
@@ -223,7 +238,8 @@ pub fn compute_daily_stress(
     def: &CropDef,
     temp: f32,
     is_frost: bool,
-    moisture: f32,
+    available: f32,
+    air: f32,
     fertility: f32,
     overripe_days: u32,
 ) -> StressBreakdown {
@@ -238,12 +254,28 @@ pub fn compute_daily_stress(
     let frost_hit = is_frost && !def.frost_tolerant;
     let frost_stress = if frost_hit { FROST_STRESS } else { 0.0 };
 
-    let moisture_status = range_status(moisture, def.min_moisture, def.max_moisture, def.ideal_moisture_range);
-    let moisture_stress = match moisture_status {
-        RangeStatus::BelowMin => (def.min_moisture - moisture) * MOISTURE_STRESS_SCALE,
-        RangeStatus::AboveMax => (moisture - def.max_moisture) * MOISTURE_STRESS_SCALE,
-        RangeStatus::BelowIdeal | RangeStatus::AboveIdeal => OUTSIDE_IDEAL_STRESS,
-        RangeStatus::Ideal => 0.0,
+    // Both water axes only have a lower bound, so reuse range_status with
+    // an infinite maximum.
+    let inf = f32::INFINITY;
+    let drought_status = range_status(
+        available,
+        def.min_available_water,
+        inf,
+        (def.ideal_available_water, inf),
+    );
+    let drought_stress = match drought_status {
+        RangeStatus::BelowMin => (def.min_available_water - available) * MOISTURE_STRESS_SCALE,
+        RangeStatus::BelowIdeal => OUTSIDE_IDEAL_STRESS,
+        _ => 0.0,
+    };
+
+    let waterlog_status = range_status(air, def.min_air_porosity, inf, (def.ideal_air_porosity, inf));
+    let waterlog_stress = match waterlog_status {
+        RangeStatus::BelowMin => {
+            (def.min_air_porosity - air) / def.min_air_porosity.max(f32::EPSILON) * MOISTURE_STRESS_SCALE
+        }
+        RangeStatus::BelowIdeal => OUTSIDE_IDEAL_STRESS,
+        _ => 0.0,
     };
 
     let fertility_ok = fertility >= def.fertility_requirement;
@@ -251,15 +283,17 @@ pub fn compute_daily_stress(
 
     let overripe_stress = overripe_days as f32 * def.overripe_stress_per_day;
 
-    let total = temp_stress + frost_stress + moisture_stress + fertility_stress + overripe_stress;
+    let total = temp_stress + frost_stress + drought_stress + waterlog_stress + fertility_stress + overripe_stress;
 
     StressBreakdown {
         temp_status,
         temp_stress,
         frost_hit,
         frost_stress,
-        moisture_status,
-        moisture_stress,
+        drought_status,
+        drought_stress,
+        waterlog_status,
+        waterlog_stress,
         fertility_ok,
         fertility_stress,
         overripe_days,
@@ -360,5 +394,50 @@ mod tests {
     fn yield_amount_is_clamped_not_negative_at_extreme_stress() {
         let amount = yield_amount(1000.0, 1.0, 1.0, 50);
         assert_eq!(amount, 0);
+    }
+
+    fn tomato_like() -> CropDef {
+        CropDef {
+            id: "t".into(),
+            name: "t".into(),
+            growth_stages: vec![],
+            min_temp: 0.0,
+            max_temp: 40.0,
+            ideal_temp_range: (10.0, 30.0),
+            frost_tolerant: true,
+            min_available_water: 0.15,
+            ideal_available_water: 0.4,
+            min_air_porosity: 0.08,
+            ideal_air_porosity: 0.15,
+            daily_water_use_mm: 4.0,
+            fertility_requirement: 0.0,
+            base_yield: 1,
+            sell_price: 1,
+            seed_cost: 1,
+            quality_thresholds: thresholds(),
+            optimal_harvest_window_days: 1,
+            overripe_stress_per_day: 0.0,
+            fertility_impact_per_day: 0.0,
+        }
+    }
+
+    #[test]
+    fn water_axes_grade_independently() {
+        let def = tomato_like();
+        let ok = compute_daily_stress(&def, 20.0, false, 0.8, 0.2, 0.5, 0);
+        assert_eq!(ok.total, 0.0);
+
+        let dry = compute_daily_stress(&def, 20.0, false, 0.05, 0.2, 0.5, 0);
+        assert_eq!(dry.drought_status, RangeStatus::BelowMin);
+        assert_eq!(dry.waterlog_status, RangeStatus::Ideal);
+        assert!(dry.total > 0.0);
+
+        // Air 0.12 (clay at field capacity) is only mildly stressful for a
+        // crop whose minimum is 0.08; near saturation it is severe.
+        let soggy = compute_daily_stress(&def, 20.0, false, 1.0, 0.12, 0.5, 0);
+        assert_eq!(soggy.waterlog_status, RangeStatus::BelowIdeal);
+        let waterlogged = compute_daily_stress(&def, 20.0, false, 1.0, 0.0, 0.5, 0);
+        assert_eq!(waterlogged.waterlog_status, RangeStatus::BelowMin);
+        assert!(waterlogged.waterlog_stress > soggy.waterlog_stress);
     }
 }
