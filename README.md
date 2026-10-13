@@ -70,7 +70,10 @@ src/
     ├── render.rs      # camera pan/zoom, placeholder tile sprites/labels, click-to-select
     └── panels.rs      # top bar, tile inspector, action queue, economy, save/load panels
 assets/
-└── crops/         # crop definition JSON files: tomato, wheat, carrot, green_bean
+├── crops/         # crop definition JSON files: tomato, wheat, carrot, green_bean
+├── soil/          # soil definition JSON files: sandy, loamy, clay
+├── generate.py    # regenerates the placeholder SVG art
+└── svg_to_png.sh  # converts the SVGs to the PNGs the game loads (needs Inkscape)
 save/              # save files (JSON), created on first save — gitignore this
 build.rs           # copies assets/ into target/<profile>/assets/
 ```

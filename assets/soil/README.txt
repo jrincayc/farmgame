@@ -7,5 +7,5 @@ fractions; drainage_rate is the fraction of water above field capacity
 lost per day; evaporation_mm_per_day is defined at 25 C; texture
 (0 coarse .. 1 fine) orders soils for world generation.
 
-Drop converted PNGs here: sandy.png, loamy.png, clay.png, tilled_overlay.png
-(see the SVG source set + generate.py from the earlier batch)
+The PNGs (sandy.png, loamy.png, clay.png, tilled_overlay.png) are
+generated from the SVGs here: run assets/svg_to_png.sh (needs Inkscape).
