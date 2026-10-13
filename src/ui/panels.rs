@@ -17,8 +17,9 @@ use bevy_egui::{egui, EguiContexts};
 use crate::climate::{Region, WeatherToday};
 use crate::crops::{
     days_until_mature, is_mature, overripe_days, ActionKind, ActionQueue, CropDef, CropRoster,
-    NextActionId, PendingAction, RangeStatus,
+    NextActionId, PendingAction, RangeStatus, TileOrField, ActionNotices,
 };
+use crate::field::{DeleteFieldRequested, FieldBrush, FieldId, FieldIndex, FieldRegistry, TileField};
 use crate::economy::{Inventory, SellRequested, Wallet};
 use crate::farm::{FarmConfig, TileMap};
 use crate::save::{DeleteSaveRequested, LoadRequested, SaveRequested, SAVE_DIR};
@@ -97,6 +98,7 @@ pub fn top_bar(
     config: Res<FarmConfig>,
     mut save_load_open: ResMut<SaveLoadWindowOpen>,
     mut soil_overlay: ResMut<ShowSoilOverlay>,
+    mut brush: ResMut<FieldBrush>,
 ) {
     let ctx = contexts.ctx_mut();
     apply_theme(ctx, &theme);
@@ -187,6 +189,13 @@ pub fn top_bar(
             }
 
             ui.checkbox(&mut soil_overlay.0, "Soil types");
+            ui.checkbox(&mut brush.show_boundaries, "Field outlines");
+            if ui.button("Fields").clicked() {
+                brush.window_open = !brush.window_open;
+                if !brush.window_open {
+                    brush.paint = false;
+                }
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if theme.dark { "Light theme" } else { "Dark theme" };
@@ -212,6 +221,10 @@ pub fn tile_inspector_panel(
     calendar: Res<Calendar>,
     weather: Res<WeatherToday>,
     soils: Res<SoilRoster>,
+    registry: Res<FieldRegistry>,
+    index: Res<FieldIndex>,
+    tile_fields: Query<&TileField>,
+    field_tiles: Query<(&SoilState, Option<&PlantedCrop>)>,
 ) {
     egui::SidePanel::right("tile_inspector").show(contexts.ctx_mut(), |ui| {
         ui.heading("Selected Tile");
@@ -244,7 +257,22 @@ pub fn tile_inspector_panel(
         ));
         ui.label(format!("Tilled: {}", soil.tilled));
 
+        let field_id = tile_fields.get(entity).ok().and_then(|f| f.0);
+        match field_id.and_then(|id| registry.get(id)) {
+            Some(info) => {
+                ui.label(format!("Field: {}", info.name));
+            }
+            None => {
+                ui.label("Field: (none)");
+            }
+        }
+
         ui.separator();
+
+        if let Some(id) = field_id {
+            field_summary(ui, id, &registry, &index, &tile_map, &field_tiles, &soils, &crop_defs);
+            ui.separator();
+        }
 
         match planted {
             None => {
@@ -362,32 +390,16 @@ pub fn tile_inspector_panel(
 fn enqueue(
     queue: &mut ActionQueue,
     next_id: &mut NextActionId,
-    tile: Entity,
-    kind: ActionKind,
-    crop_to_plant: Option<Handle<CropDef>>,
-) {
-    enqueue_with_depth(queue, next_id, tile, kind, crop_to_plant, 0.0);
-}
-
-/// Like `enqueue`, but with a water depth in mm (only meaningful for
-/// `ActionKind::Water` - see `PendingAction::water_depth_mm`).
-fn enqueue_with_depth(
-    queue: &mut ActionQueue,
-    next_id: &mut NextActionId,
-    tile: Entity,
+    target: TileOrField,
     kind: ActionKind,
     crop_to_plant: Option<Handle<CropDef>>,
     water_depth_mm: f32,
 ) {
     let id = next_id.0;
     next_id.0 += 1;
-    queue.pending.push_back(PendingAction {
-        id,
-        tile,
-        kind,
-        crop_to_plant,
-        water_depth_mm,
-    });
+    queue
+        .pending
+        .push_back(PendingAction::new(id, target, kind, crop_to_plant, water_depth_mm));
 }
 
 pub fn action_queue_panel(
@@ -398,22 +410,53 @@ pub fn action_queue_panel(
     crop_defs: Res<Assets<CropDef>>,
     mut queue: ResMut<ActionQueue>,
     mut next_id: ResMut<NextActionId>,
+    registry: Res<FieldRegistry>,
+    index: Res<FieldIndex>,
+    mut notices: ResMut<ActionNotices>,
     mut crop_choice: Local<usize>,
     mut water_depth: Local<Option<f32>>,
+    mut field_target: Local<Option<FieldId>>,
 ) {
     egui::SidePanel::left("action_queue").show(contexts.ctx_mut(), |ui| {
         ui.heading("Actions");
 
-        let tile = selected.0.and_then(|coord| tile_map.tiles.get(&coord).copied());
-        if tile.is_none() {
-            ui.label("Select a tile to queue actions on it.");
+        // Target: the selected tile, or a whole field.
+        if field_target.is_some_and(|id| registry.get(id).is_none()) {
+            *field_target = None;
+        }
+        let target_label = match *field_target {
+            Some(id) => registry.get(id).map(|f| f.name.clone()).unwrap_or_default(),
+            None => "Selected tile".to_string(),
+        };
+        egui::ComboBox::from_label("Target")
+            .selected_text(target_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut *field_target, None, "Selected tile");
+                for f in &registry.fields {
+                    ui.selectable_value(&mut *field_target, Some(f.id), &f.name);
+                }
+            });
+
+        let target: Option<TileOrField> = match *field_target {
+            Some(id) => Some(TileOrField::Field(id)),
+            None => selected
+                .0
+                .and_then(|coord| tile_map.tiles.get(&coord).copied())
+                .map(TileOrField::Tile),
+        };
+        if target.is_none() {
+            ui.label("Select a tile (or choose a field) to queue actions.");
         }
 
-        ui.add_enabled_ui(tile.is_some(), |ui| {
-            if ui.button("Till").clicked() {
-                if let Some(t) = tile {
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Till, None);
+        ui.add_enabled_ui(target.is_some(), |ui| {
+            let mut queue_action = |kind: ActionKind, crop: Option<Handle<CropDef>>, depth: f32| {
+                if let Some(t) = target {
+                    enqueue(&mut queue, &mut next_id, t, kind, crop, depth);
                 }
+            };
+
+            if ui.button("Till").clicked() {
+                queue_action(ActionKind::Till, None, 0.0);
             }
             // Water depth in mm: 5 mm steps with 10/20/30 presets.
             let depth = water_depth.get_or_insert(20.0);
@@ -427,24 +470,16 @@ pub fn action_queue_panel(
             });
             *depth = (*depth / 5.0).round().max(1.0) * 5.0;
             if ui.button(format!("Water {:.0} mm", *depth)).clicked() {
-                if let Some(t) = tile {
-                    enqueue_with_depth(&mut queue, &mut next_id, t, ActionKind::Water, None, *depth);
-                }
+                queue_action(ActionKind::Water, None, *depth);
             }
             if ui.button("Fertilize").clicked() {
-                if let Some(t) = tile {
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Fertilize, None);
-                }
+                queue_action(ActionKind::Fertilize, None, 0.0);
             }
             if ui.button("Harvest").clicked() {
-                if let Some(t) = tile {
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Harvest, None);
-                }
+                queue_action(ActionKind::Harvest, None, 0.0);
             }
             if ui.button("Clear").clicked() {
-                if let Some(t) = tile {
-                    enqueue(&mut queue, &mut next_id, t, ActionKind::Clear, None);
-                }
+                queue_action(ActionKind::Clear, None, 0.0);
             }
 
             ui.separator();
@@ -466,29 +501,111 @@ pub fn action_queue_panel(
                         }
                     });
                 if ui.button("Plant").clicked() {
-                    if let Some(t) = tile {
-                        let handle = roster.entries[*crop_choice].handle.clone();
-                        enqueue(&mut queue, &mut next_id, t, ActionKind::Plant, Some(handle));
-                    }
+                    let handle = roster.entries[*crop_choice].handle.clone();
+                    queue_action(ActionKind::Plant, Some(handle), 0.0);
                 }
             }
         });
 
         ui.separator();
         ui.heading("Pending Queue (FIFO)");
-        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
             if queue.pending.is_empty() {
                 ui.label("(empty)");
             }
             for action in &queue.pending {
-                if action.kind == ActionKind::Water {
-                    ui.label(format!("#{} - Water ({:.0} mm)", action.id, action.water_depth_mm));
+                let what = if action.kind == ActionKind::Water {
+                    format!("Water {:.0} mm", action.water_depth_mm)
                 } else {
-                    ui.label(format!("#{} - {:?}", action.id, action.kind));
+                    format!("{:?}", action.kind)
+                };
+                match action.target {
+                    TileOrField::Tile(_) => {
+                        ui.label(format!("#{} - {} (tile)", action.id, what));
+                    }
+                    TileOrField::Field(id) => {
+                        let name = registry.get(id).map(|f| f.name.as_str()).unwrap_or("?");
+                        let remaining = index
+                            .tiles_of(id)
+                            .filter(|c| !action.visited.contains(c))
+                            .count();
+                        ui.label(format!(
+                            "#{} - {} on {}: {} applied, {} skipped, {} remaining",
+                            action.id, what, name, action.applied, action.skipped, remaining
+                        ));
+                    }
                 }
             }
         });
+
+        if !notices.0.is_empty() {
+            ui.separator();
+            for n in &notices.0 {
+                ui.colored_label(egui::Color32::from_rgb(200, 120, 0), n);
+            }
+            if ui.small_button("Dismiss").clicked() {
+                notices.0.clear();
+            }
+        }
     });
+}
+
+/// Floating window for creating, renaming, deleting and painting fields.
+pub fn fields_window(
+    mut contexts: EguiContexts,
+    mut brush: ResMut<FieldBrush>,
+    mut registry: ResMut<FieldRegistry>,
+    index: Res<FieldIndex>,
+    mut deletes: EventWriter<DeleteFieldRequested>,
+    mut name_buffers: Local<std::collections::HashMap<FieldId, String>>,
+) {
+    if !brush.window_open {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Fields").open(&mut open).show(contexts.ctx_mut(), |ui| {
+        ui.checkbox(&mut brush.paint, "Paint mode (left-drag a rectangle on the map)");
+        ui.radio_value(&mut brush.active, None, "Unassigned (eraser)");
+
+        let mut to_delete = None;
+        let ids: Vec<FieldId> = registry.fields.iter().map(|f| f.id).collect();
+        for id in ids {
+            let Some(info) = registry.get(id).cloned() else { continue };
+            let buffer = name_buffers.entry(id).or_insert_with(|| info.name.clone());
+            ui.horizontal(|ui| {
+                let [r, g, b] = info.color;
+                ui.colored_label(egui::Color32::from_rgb(r, g, b), "\u{25A0}");
+                ui.radio_value(&mut brush.active, Some(id), "");
+                let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(110.0));
+                if response.lost_focus() {
+                    // Names are unique and non-empty; otherwise revert.
+                    if !registry.rename(id, buffer) {
+                        *buffer = info.name.clone();
+                    } else {
+                        *buffer = buffer.trim().to_string();
+                    }
+                }
+                ui.label(format!("{} tiles", index.len_of(id)));
+                if ui.small_button("Delete").clicked() {
+                    to_delete = Some(id);
+                }
+            });
+        }
+        if let Some(id) = to_delete {
+            deletes.write(DeleteFieldRequested(id));
+            name_buffers.remove(&id);
+        }
+
+        if ui.button("New field").clicked() {
+            let name = registry.suggest_name();
+            let id = registry.create(name);
+            brush.active = Some(id);
+        }
+    });
+    if !open {
+        brush.window_open = false;
+        brush.paint = false;
+    }
 }
 
 fn crop_display_name(entry: &crate::crops::CropRosterEntry, crop_defs: &Assets<CropDef>) -> String {
@@ -601,4 +718,50 @@ pub fn save_load_panel(
             });
         }
     });
+}
+
+/// Field-level summary for the inspector (design doc §6.5): tile count,
+/// planted tiles that are too dry or soggy by their own crop's ideal
+/// range, and mm needed to reach field capacity across the field's tiles.
+fn field_summary(
+    ui: &mut egui::Ui,
+    id: FieldId,
+    registry: &FieldRegistry,
+    index: &FieldIndex,
+    tile_map: &TileMap,
+    tiles: &Query<(&SoilState, Option<&PlantedCrop>)>,
+    soils: &SoilRoster,
+    crop_defs: &Assets<CropDef>,
+) {
+    let Some(info) = registry.get(id) else { return };
+    let (mut count, mut planted, mut dry, mut soggy) = (0u32, 0u32, 0u32, 0u32);
+    let (mut sum, mut min, mut max) = (0.0f32, f32::MAX, 0.0f32);
+    for coord in index.tiles_of(id) {
+        let Some(&entity) = tile_map.tiles.get(&coord) else { continue };
+        let Ok((soil, crop)) = tiles.get(entity) else { continue };
+        let def = soils.get(soil.soil as usize);
+        count += 1;
+        let need = (def.field_capacity_mm() - soil.water_mm).max(0.0);
+        sum += need;
+        min = min.min(need);
+        max = max.max(need);
+        if let Some(crop_def) = crop.filter(|c| !c.dead).and_then(|c| crop_defs.get(&c.def)) {
+            planted += 1;
+            dry += (def.available(soil.water_mm) < crop_def.ideal_available_water) as u32;
+            soggy += (def.air(soil.water_mm) < crop_def.min_air_porosity) as u32;
+        }
+    }
+    if count == 0 {
+        ui.label(format!("Field '{}': no tiles", info.name));
+        return;
+    }
+    ui.label(format!("Field '{}': {} tiles", info.name, count));
+    ui.label(format!("  {} of {} planted tiles too dry", dry, planted));
+    ui.label(format!("  {} of {} planted tiles waterlogged", soggy, planted));
+    ui.label(format!(
+        "  To field capacity: mean {:.1} mm (min {:.1}, max {:.1})",
+        sum / count as f32,
+        min,
+        max
+    ));
 }

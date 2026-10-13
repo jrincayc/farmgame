@@ -43,6 +43,7 @@ use crate::farm::{FarmConfig, SoilState, Tile, TileMap};
 
 use super::sprites::{soil_overlay_color, soil_tint, CropSpriteRoster, SoilSpriteRoster};
 use super::{SelectedTile, ShowSoilOverlay};
+use crate::field::{FieldBrush, FieldRegistry, PaintFieldRequested, TileField};
 use crate::soil::SoilRoster;
 
 /// World-space size of one tile's square, plus a small gap so tiles
@@ -513,6 +514,24 @@ pub fn sync_tile_visuals(
 /// modifier+click-without-moving would both pan (by zero) and select a
 /// tile, a confusing double-purpose for the same click. A plain,
 /// un-modified left click still selects a tile exactly as before.
+/// The tile coordinate under the cursor (not checked against the farm
+/// bounds), or `None` if the cursor is outside the window.
+fn cursor_tile(window: &Window, camera: &Camera, camera_transform: &GlobalTransform) -> Option<IVec2> {
+    let cursor = window.cursor_position()?;
+    let world_pos = camera.viewport_to_world_2d(camera_transform, cursor).ok()?;
+    // Tiles are rendered center-anchored at `coord * TILE_STRIDE` (see
+    // `tile_world_pos` / `spawn_tile_visuals`), so round to the nearest
+    // tile center. `.floor()` would hit-test corner-origin cells, a
+    // half-tile off from what's drawn.
+    Some(IVec2::new(
+        (world_pos.x / TILE_STRIDE).round() as i32,
+        (world_pos.y / TILE_STRIDE).round() as i32,
+    ))
+}
+
+/// Left-click selects a tile. In field paint mode (`FieldBrush::paint`)
+/// a left-drag instead assigns the dragged rectangle to the active field
+/// (or unassigns it, for the "Unassigned" eraser) on release.
 pub fn tile_click_system(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -520,8 +539,25 @@ pub fn tile_click_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedTile>,
     tile_map: Res<TileMap>,
+    mut brush: ResMut<FieldBrush>,
+    mut paint_events: EventWriter<PaintFieldRequested>,
     mut contexts: EguiContexts,
 ) {
+    let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), camera_q.single()) else {
+        return;
+    };
+
+    if brush.paint && mouse.just_released(MouseButton::Left) {
+        if let Some(start) = brush.drag_start.take() {
+            let end = cursor_tile(window, camera, camera_transform).unwrap_or(start);
+            paint_events.write(PaintFieldRequested {
+                a: start,
+                b: end,
+                field: brush.active,
+            });
+        }
+    }
+
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
@@ -536,33 +572,68 @@ pub fn tile_click_system(
         return;
     }
 
-    let Ok(window) = windows.single() else {
+    let Some(coord) = cursor_tile(window, camera, camera_transform) else {
         return;
     };
-    let Some(cursor) = window.cursor_position() else {
+    if !tile_map.tiles.contains_key(&coord) {
         return;
-    };
-    let Ok((camera, camera_transform)) = camera_q.single() else {
-        return;
-    };
-    let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor) else {
-        return;
-    };
-
-    // Tiles are rendered center-anchored at `coord * TILE_STRIDE` (see
-    // `tile_world_pos` / `spawn_tile_visuals`), not corner-anchored at
-    // `coord * TILE_STRIDE` with the tile spanning forward from there.
-    // `.floor()` would hit-test the latter (a grid of corner-origin
-    // cells), which is a half-tile off from what's actually drawn -
-    // clicking near a tile's left/bottom edge would silently select its
-    // lower-left neighbor instead. Rounding to the nearest tile center
-    // matches the render grid instead.
-    let coord = IVec2::new(
-        (world_pos.x / TILE_STRIDE).round() as i32,
-        (world_pos.y / TILE_STRIDE).round() as i32,
-    );
-
-    if tile_map.tiles.contains_key(&coord) {
+    }
+    if brush.paint {
+        brush.drag_start = Some(coord);
+    } else {
         selected.0 = Some(coord);
+    }
+}
+
+/// Field boundaries (outlines on edges where neighbouring tiles' fields
+/// differ, in the field's colour) and the paint-drag preview. Drawn with
+/// gizmos so it doesn't clash with the soil tint (design doc §6.5).
+pub fn draw_field_overlay(
+    mut gizmos: Gizmos,
+    brush: Res<FieldBrush>,
+    registry: Res<FieldRegistry>,
+    tile_map: Res<TileMap>,
+    tiles: Query<(&Tile, &TileField)>,
+    all_fields: Query<&TileField>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) {
+    if brush.show_boundaries {
+        let half = TILE_STRIDE / 2.0;
+        // (neighbour offset, edge start, edge end) relative to tile center.
+        let edges = [
+            (IVec2::new(1, 0), Vec2::new(half, -half), Vec2::new(half, half)),
+            (IVec2::new(-1, 0), Vec2::new(-half, -half), Vec2::new(-half, half)),
+            (IVec2::new(0, 1), Vec2::new(-half, half), Vec2::new(half, half)),
+            (IVec2::new(0, -1), Vec2::new(-half, -half), Vec2::new(half, -half)),
+        ];
+        for (tile, field) in &tiles {
+            let Some(id) = field.0 else { continue };
+            let Some(info) = registry.get(id) else { continue };
+            let [r, g, b] = info.color;
+            let color = Color::srgb_u8(r, g, b);
+            let center = tile_world_pos(tile.coord);
+            for (offset, start, end) in edges {
+                let neighbour = tile_map
+                    .tiles
+                    .get(&(tile.coord + offset))
+                    .and_then(|&e| all_fields.get(e).ok())
+                    .and_then(|f| f.0);
+                if neighbour != Some(id) {
+                    gizmos.line_2d(center + start, center + end, color);
+                }
+            }
+        }
+    }
+
+    if let (true, Some(start)) = (brush.paint, brush.drag_start) {
+        if let (Ok(window), Ok((camera, camera_transform))) = (windows.single(), camera_q.single()) {
+            if let Some(end) = cursor_tile(window, camera, camera_transform) {
+                let (min, max) = (start.min(end), start.max(end));
+                let lo = tile_world_pos(min) - Vec2::splat(TILE_STRIDE / 2.0);
+                let hi = tile_world_pos(max) + Vec2::splat(TILE_STRIDE / 2.0);
+                gizmos.rect_2d((lo + hi) / 2.0, hi - lo, Color::WHITE);
+            }
+        }
     }
 }

@@ -13,6 +13,7 @@ mod climate;
 mod crops;
 mod economy;
 mod farm;
+mod field;
 mod save;
 mod sim_order;
 mod soil;
@@ -20,7 +21,7 @@ mod time;
 mod ui;
 
 use climate::{ClimatePlugin, Region, WeatherToday};
-use crops::{ActionKind, ActionQueue, CropDef, CropsPlugin, NextActionId, PendingAction, PlantedCrop};
+use crops::{ActionKind, ActionQueue, CropDef, CropsPlugin, NextActionId, PendingAction, PlantedCrop, TileOrField};
 use economy::{EconomyPlugin, Inventory, SellRequested, Wallet};
 use farm::{FarmPlugin, SoilState, TileMap};
 use time::{Calendar, DayAdvanced, StepDayRequested, TimeControl, TimeMode, TimePlugin, TimerSpeed};
@@ -38,6 +39,7 @@ fn main() {
     .add_plugins(TimePlugin)
     .add_plugins(ClimatePlugin)
     .add_plugins(FarmPlugin)
+    .add_plugins(field::FieldPlugin)
     .add_plugins(CropsPlugin)
     .add_plugins(EconomyPlugin)
     .add_plugins(save::SavePlugin)
@@ -180,14 +182,8 @@ fn enqueue_action(
 ) {
     let id = next_id.0;
     next_id.0 += 1;
-    queue.pending.push_back(PendingAction {
-        id,
-        tile,
-        kind,
-        crop_to_plant,
-        // Dev keyboard controls queue a standard 20 mm watering.
-        water_depth_mm: 20.0,
-    });
+    // Dev keyboard controls queue a standard 20 mm watering.
+    queue.pending.push_back(PendingAction::new(id, TileOrField::Tile(tile), kind, crop_to_plant, 20.0));
 }
 
 /// **Phase 5 dev glue** (same spirit/tradeoffs as `dev_crop_controls`):

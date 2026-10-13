@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::climate::{Region, WeatherToday};
 use crate::crops::{CropDef, PlantedCrop};
+use crate::field::TileField;
 use crate::sim_order::DayAdvanceOrder;
 use crate::soil::{self, SoilRoster, MAX_DAILY_RAIN_MM};
 use crate::time::{Calendar, DayAdvanced};
@@ -147,6 +148,7 @@ pub fn spawn_tile_grid(commands: &mut Commands, config: &FarmConfig, tile_map: &
             let entity = commands
                 .spawn((
                     Tile { coord },
+                    TileField::default(),
                     SoilState {
                         fertility: FALLOW_FERTILITY_BASELINE,
                         water_mm: soils.get(soil_index as usize).field_capacity_mm(),

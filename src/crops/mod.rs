@@ -34,7 +34,7 @@ pub use crop_def::{
 };
 pub use equipment::Equipment;
 pub use growth::{days_until_mature, is_mature, overripe_days, PlantedCrop};
-pub use queue::{ActionKind, ActionQueue, NextActionId, PendingAction};
+pub use queue::{ActionKind, ActionNotices, ActionQueue, NextActionId, PendingAction, TileOrField};
 pub use roster::{CropRoster, CropRosterEntry, CropRosterPlugin};
 
 use bevy::prelude::*;

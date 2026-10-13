@@ -43,9 +43,10 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, Equipment, NextActionId, PendingAction, PlantedCrop};
+use crate::crops::{ActionKind, ActionQueue, CropDef, CropRoster, Equipment, NextActionId, PendingAction, PlantedCrop, TileOrField};
 use crate::economy::{Inventory, Market, Wallet};
 use crate::farm::{self, FarmConfig, SoilState, Tile, TileMap};
+use crate::field::{FieldId, FieldIndex, FieldRegistry, TileField};
 use crate::soil::SoilRoster;
 use crate::time::{Calendar, TimeControl, TimeMode};
 use crate::ui::UiTheme;
@@ -186,6 +187,9 @@ struct SavedTile {
     coord: IVec2,
     soil: SavedSoil,
     planted_crop: Option<SavedCrop>,
+    /// Field assignment (`FieldId`); absent in older saves.
+    #[serde(default)]
+    field: Option<u32>,
 }
 
 /// Depth the legacy `water_intensity` of 1.0 maps to (0.5 maps to half).
@@ -198,7 +202,18 @@ const LEGACY_FULL_WATERING_MM: f32 = 20.0;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SavedAction {
     id: u64,
-    tile_coord: IVec2,
+    /// The target is a single tile (this) or a field (`field`).
+    #[serde(default)]
+    tile_coord: Option<IVec2>,
+    #[serde(default)]
+    field: Option<u32>,
+    /// Tiles already visited, and the applied/skipped counts.
+    #[serde(default)]
+    visited: Vec<IVec2>,
+    #[serde(default)]
+    applied: u32,
+    #[serde(default)]
+    skipped: u32,
     kind: ActionKind,
     crop_to_plant: Option<String>,
     /// Mirrors `PendingAction::water_depth_mm`. Missing in older saves,
@@ -220,6 +235,8 @@ struct SaveGame {
     ui_theme: UiTheme,
     farm_config: FarmConfig,
     inventory: Inventory,
+    #[serde(default)]
+    fields: FieldRegistry,
     tiles: Vec<SavedTile>,
     action_queue: Vec<SavedAction>,
     next_action_id: u64,
@@ -270,8 +287,9 @@ fn save_game(
     inventory: Res<Inventory>,
     queue: Res<ActionQueue>,
     next_id: Res<NextActionId>,
-    tiles: Query<(&Tile, &SoilState, Option<&PlantedCrop>)>,
+    tiles: Query<(&Tile, &SoilState, Option<&PlantedCrop>, &TileField)>,
     tile_lookup: Query<&Tile>,
+    fields: Res<FieldRegistry>,
     crop_defs: Res<Assets<CropDef>>,
     soils: Res<SoilRoster>,
 ) {
@@ -283,7 +301,7 @@ fn save_game(
 
         let saved_tiles: Vec<SavedTile> = tiles
             .iter()
-            .map(|(tile, soil, planted)| {
+            .map(|(tile, soil, planted, tile_field)| {
                 let planted_crop = planted.and_then(|crop| {
                     crop_defs.get(&crop.def).map(|def| SavedCrop {
                         crop_id: def.id.clone(),
@@ -299,6 +317,7 @@ fn save_game(
                     coord: tile.coord,
                     soil: SavedSoil::from_state(soil, &soils),
                     planted_crop,
+                    field: tile_field.0.map(|f| f.0),
                 }
             })
             .collect();
@@ -307,13 +326,21 @@ fn save_game(
             .pending
             .iter()
             .filter_map(|action| {
-                let Ok(tile) = tile_lookup.get(action.tile) else {
-                    warn!(
-                        "Dropping queued action #{} from save: its tile entity no longer exists",
-                        action.id
-                    );
-                    return None;
+                let (tile_coord, field) = match action.target {
+                    TileOrField::Tile(entity) => {
+                        let Ok(tile) = tile_lookup.get(entity) else {
+                            warn!(
+                                "Dropping queued action #{} from save: its tile entity no longer exists",
+                                action.id
+                            );
+                            return None;
+                        };
+                        (Some(tile.coord), None)
+                    }
+                    TileOrField::Field(id) => (None, Some(id.0)),
                 };
+                let mut visited: Vec<IVec2> = action.visited.iter().copied().collect();
+                visited.sort_by_key(|c| (c.y, c.x));
                 let crop_to_plant = action
                     .crop_to_plant
                     .as_ref()
@@ -321,7 +348,11 @@ fn save_game(
                     .map(|def| def.id.clone());
                 Some(SavedAction {
                     id: action.id,
-                    tile_coord: tile.coord,
+                    tile_coord,
+                    field,
+                    visited,
+                    applied: action.applied,
+                    skipped: action.skipped,
                     kind: action.kind,
                     crop_to_plant,
                     water_depth_mm: Some(action.water_depth_mm),
@@ -339,6 +370,7 @@ fn save_game(
             ui_theme: *theme,
             farm_config: config.clone(),
             inventory: inventory.clone(),
+            fields: fields.clone(),
             tiles: saved_tiles,
             action_queue: saved_actions,
             next_action_id: next_id.0,
@@ -407,6 +439,7 @@ fn load_game(
     existing_tiles: Query<Entity, With<Tile>>,
     // Grouped: a system function takes at most 16 parameters.
     (roster, crop_defs, soils): (Res<CropRoster>, Res<Assets<CropDef>>, Res<SoilRoster>),
+    (mut field_registry, mut field_index): (ResMut<FieldRegistry>, ResMut<FieldIndex>),
 ) {
     for ev in events.read() {
         let Some(path) = sanitized_path(&ev.name) else {
@@ -436,6 +469,11 @@ fn load_game(
         *config = save.farm_config.clone();
         farm::spawn_tile_grid(&mut commands, &config, &mut tile_map, &soils);
 
+        // Fields: restore the registry, then (below) each tile's
+        // assignment; the index is rebuilt from the tile values.
+        *field_registry = save.fields.clone();
+        let mut assignments: Vec<(IVec2, FieldId)> = Vec::new();
+
         // 3. Overwrite each tile's soil, and re-plant if the save had a
         // live crop there.
         for saved_tile in &save.tiles {
@@ -448,6 +486,11 @@ fn load_game(
             };
             let fallback = saved_tile.soil.to_state(&soils, 0);
             commands.entity(entity).insert(fallback);
+
+            if let Some(id) = saved_tile.field.map(FieldId).filter(|id| field_registry.get(*id).is_some()) {
+                commands.entity(entity).insert(TileField(Some(id)));
+                assignments.push((saved_tile.coord, id));
+            }
 
             if let Some(saved_crop) = &saved_tile.planted_crop {
                 match resolve_crop_handle(&saved_crop.crop_id, &roster, &crop_defs) {
@@ -472,15 +515,27 @@ fn load_game(
             }
         }
 
+        field_index.rebuild(assignments);
+
         // 4. Rebuild the action queue against the new TileMap/handles.
         queue.pending.clear();
         for saved_action in &save.action_queue {
-            let Some(&tile_entity) = tile_map.tiles.get(&saved_action.tile_coord) else {
-                warn!(
-                    "Dropping queued action #{} on load: tile {:?} isn't in the rebuilt farm",
-                    saved_action.id, saved_action.tile_coord
-                );
-                continue;
+            let target = match (saved_action.tile_coord, saved_action.field) {
+                (Some(coord), _) => match tile_map.tiles.get(&coord) {
+                    Some(&entity) => TileOrField::Tile(entity),
+                    None => {
+                        warn!(
+                            "Dropping queued action #{} on load: tile {:?} isn't in the rebuilt farm",
+                            saved_action.id, coord
+                        );
+                        continue;
+                    }
+                },
+                (None, Some(id)) => TileOrField::Field(FieldId(id)),
+                (None, None) => {
+                    warn!("Dropping queued action #{} on load: it has no target", saved_action.id);
+                    continue;
+                }
             };
             let crop_to_plant = match &saved_action.crop_to_plant {
                 Some(id) => match resolve_crop_handle(id, &roster, &crop_defs) {
@@ -495,16 +550,20 @@ fn load_game(
                 },
                 None => None,
             };
-            queue.pending.push_back(PendingAction {
-                id: saved_action.id,
-                tile: tile_entity,
-                kind: saved_action.kind,
+            let mut action = PendingAction::new(
+                saved_action.id,
+                target,
+                saved_action.kind,
                 crop_to_plant,
-                water_depth_mm: saved_action
+                saved_action
                     .water_depth_mm
                     .or(saved_action.water_intensity.map(|i| i * LEGACY_FULL_WATERING_MM))
                     .unwrap_or(LEGACY_FULL_WATERING_MM),
-            });
+            );
+            action.visited = saved_action.visited.iter().copied().collect();
+            action.applied = saved_action.applied;
+            action.skipped = saved_action.skipped;
+            queue.pending.push_back(action);
         }
         next_id.0 = save.next_action_id;
 

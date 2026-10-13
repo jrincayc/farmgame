@@ -93,6 +93,7 @@ impl Plugin for UiPlugin {
                     render::spawn_tile_visuals,
                     render::sync_tile_visuals,
                     render::tile_click_system,
+                    render::draw_field_overlay,
                 )
                     .chain(),
             )
@@ -102,6 +103,7 @@ impl Plugin for UiPlugin {
                     panels::top_bar,
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
+                    panels::fields_window,
                     panels::economy_panel,
                     // Save/load panel: gated by SaveLoadWindowOpen
                     // (Phase 8) rather than always-open. Kept last for

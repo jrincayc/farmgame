@@ -62,7 +62,7 @@ Things to keep in mind given "some coding experience, new to games":
 - **Evapotranspiration (planned; design doc §6.3):** soil evaporation and crop transpiration remove water every day, scaled by temperature, so hot spells dry soil faster and cold spells barely at all. Crops declare how much water they use.
 - **Soil layout (planned; design doc §6.7):** soil types are laid out in coherent patches (neighbouring textures grade into one another) rather than in columns, and the player can see each tile's soil type before committing to decisions that depend on it.
 
-### 4.2a Fields (planned; design doc §6.5–6.6)
+### 4.2a Fields (implemented; design doc §6.5–6.6)
 
 Single-tile actions are the wrong grain on a farm of thousands of tiles. Planned requirements:
 
