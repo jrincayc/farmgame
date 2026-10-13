@@ -81,6 +81,7 @@ impl Plugin for UiPlugin {
             .init_resource::<UiTheme>()
             .init_resource::<SaveLoadWindowOpen>()
             .init_resource::<ShowSoilOverlay>()
+            .init_resource::<render::PanelInsets>()
             .init_resource::<CropSpriteRoster>()
             .add_systems(Startup, (render::setup_camera, sprites::load_soil_sprites))
             .add_systems(
@@ -106,6 +107,7 @@ impl Plugin for UiPlugin {
                     // (Phase 8) rather than always-open. Kept last for
                     // the same readability reason as before.
                     panels::save_load_panel,
+                    render::record_panel_insets,
                 )
                     .chain(),
             );

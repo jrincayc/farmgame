@@ -78,6 +78,29 @@ const SCROLL_ZOOM_STEP: f32 = 1.15;
 /// duplicating a slightly different constant.
 pub const BUTTON_ZOOM_STEP: f32 = 1.5;
 
+/// Window pixels currently covered by egui panels on each side, recorded
+/// by `record_panel_insets` at the end of the egui pass (egui's
+/// `available_rect` can only be read there) and used to keep the farm's
+/// edges pannable into view.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct PanelInsets {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+pub fn record_panel_insets(mut contexts: EguiContexts, mut insets: ResMut<PanelInsets>) {
+    let ctx = contexts.ctx_mut();
+    let (screen, free) = (ctx.screen_rect(), ctx.available_rect());
+    *insets = PanelInsets {
+        left: (free.min.x - screen.min.x).max(0.0),
+        right: (screen.max.x - free.max.x).max(0.0),
+        top: (free.min.y - screen.min.y).max(0.0),
+        bottom: (screen.max.y - free.max.y).max(0.0),
+    };
+}
+
 /// Camera pan/zoom state, decoupled from the actual `Transform`/
 /// `Projection` on the camera entity so clamping and resize-handling
 /// have one clear place to read/write from. `center` is a world-space
@@ -285,6 +308,7 @@ pub fn camera_apply_system(
     mut camera_q: Query<(&mut Transform, &mut Projection), With<Camera2d>>,
     mut state: ResMut<CameraState>,
     config: Res<FarmConfig>,
+    insets: Res<PanelInsets>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -292,6 +316,11 @@ pub fn camera_apply_system(
     let Ok((mut transform, mut projection)) = camera_q.single_mut() else {
         return;
     };
+
+    // Pixels of the window covered by egui panels on each side. The
+    // camera renders to the full window, so without this the farm's edge
+    // tiles would stay hidden behind the panels at the pan limit.
+    let (left, right, top, bottom) = (insets.left, insets.right, insets.top, insets.bottom);
 
     let world_size = farm_world_size(&config);
     let viewport_px = Vec2::new(window.width(), window.height());
@@ -301,19 +330,24 @@ pub fn camera_apply_system(
     // Half the world-space area actually visible at this scale.
     let half_view = viewport_px * scale * 0.5;
 
-    // If the visible area is already >= the farm's extent on an axis
-    // (typical at zoom_factor == MIN_ZOOM_FACTOR, or a very wide/short
-    // window), there's no room to pan on that axis - clamp to dead
-    // center instead of an inverted [min, max] range.
-    let clamp_axis = |value: f32, half: f32, world: f32| -> f32 {
-        if half * 2.0 >= world {
-            world / 2.0
+    // Tiles are centred on `coord * TILE_STRIDE`, so the farm spans half a
+    // tile before 0 up to `world - half a tile`. Pan limits keep the
+    // uncovered (central) area within that extent; if it is larger than
+    // the farm on an axis there is no room to pan, so centre the farm in
+    // the uncovered area instead of an inverted [min, max] range.
+    let (lo, hi) = (Vec2::splat(-TILE_STRIDE / 2.0), world_size - Vec2::splat(TILE_STRIDE / 2.0));
+    let clamp_axis = |value: f32, half: f32, lo: f32, hi: f32, near: f32, far: f32| -> f32 {
+        // `near`/`far`: covered pixels on the low/high side of this axis.
+        let (min_c, max_c) = (lo + half - near * scale, hi - half + far * scale);
+        if min_c > max_c {
+            (lo + hi) / 2.0 - (near - far) / 2.0 * scale
         } else {
-            value.clamp(half, world - half)
+            value.clamp(min_c, max_c)
         }
     };
-    state.center.x = clamp_axis(state.center.x, half_view.x, world_size.x);
-    state.center.y = clamp_axis(state.center.y, half_view.y, world_size.y);
+    state.center.x = clamp_axis(state.center.x, half_view.x, lo.x, hi.x, left, right);
+    // World y is up, screen y is down: the top margin hides the high side.
+    state.center.y = clamp_axis(state.center.y, half_view.y, lo.y, hi.y, bottom, top);
 
     transform.translation.x = state.center.x;
     transform.translation.y = state.center.y;
