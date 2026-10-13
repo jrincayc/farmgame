@@ -16,7 +16,7 @@ use bevy_egui::{egui, EguiContexts};
 
 use crate::climate::{Region, WeatherToday};
 use crate::crops::{
-    days_until_mature, is_mature, overripe_days, ActionKind, ActionQueue, CropDef, CropRoster,
+    days_until_mature, is_mature, overripe_days, ActionKind, ActionQueue, CancelActionRequested, ClearQueueRequested, CropDef, CropRoster,
     NextActionId, PendingAction, RangeStatus, TileOrField
 };
 use crate::field::{ActionTargetField, DeleteFieldRequested, FieldBrush, FieldId, FieldIndex, FieldRegistry, TileField};
@@ -432,6 +432,8 @@ pub fn action_queue_panel(
     mut crop_choice: Local<usize>,
     mut water_depth: Local<Option<f32>>,
     mut field_target: ResMut<ActionTargetField>,
+    mut cancels: EventWriter<CancelActionRequested>,
+    mut clear_all: EventWriter<ClearQueueRequested>,
 ) {
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
@@ -527,7 +529,12 @@ pub fn action_queue_panel(
         });
 
         ui.separator();
-        ui.heading("Pending Queue (FIFO)");
+        ui.horizontal(|ui| {
+            ui.heading("Pending Queue (FIFO)");
+            if !queue.pending.is_empty() && ui.button("Clear all").clicked() {
+                clear_all.write(ClearQueueRequested);
+            }
+        });
         egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
             if queue.pending.is_empty() {
                 ui.label("(empty)");
@@ -538,22 +545,27 @@ pub fn action_queue_panel(
                 } else {
                     format!("{:?}", action.kind)
                 };
-                match action.target {
-                    TileOrField::Tile(_) => {
-                        ui.label(format!("#{} - {} (tile)", action.id, what));
+                ui.horizontal(|ui| {
+                    if ui.small_button("✖").on_hover_text("Cancel this action (work already done stays done)").clicked() {
+                        cancels.write(CancelActionRequested(action.id));
                     }
-                    TileOrField::Field(id) => {
-                        let name = registry.get(id).map(|f| f.name.as_str()).unwrap_or("?");
-                        let remaining = index
-                            .tiles_of(id)
-                            .filter(|c| !action.visited.contains(c))
-                            .count();
-                        ui.label(format!(
-                            "#{} - {} on {}: {} applied, {} skipped, {} remaining",
-                            action.id, what, name, action.applied, action.skipped, remaining
-                        ));
+                    match action.target {
+                        TileOrField::Tile(_) => {
+                            ui.label(format!("#{} - {} (tile)", action.id, what));
+                        }
+                        TileOrField::Field(id) => {
+                            let name = registry.get(id).map(|f| f.name.as_str()).unwrap_or("?");
+                            let remaining = index
+                                .tiles_of(id)
+                                .filter(|c| !action.visited.contains(c))
+                                .count();
+                            ui.label(format!(
+                                "#{} - {} on {}: {} applied, {} skipped, {} remaining",
+                                action.id, what, name, action.applied, action.skipped, remaining
+                            ));
+                        }
                     }
-                }
+                });
             }
         });
     });

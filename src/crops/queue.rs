@@ -110,6 +110,59 @@ pub struct ActionQueue {
 #[derive(Resource, Default)]
 pub struct NextActionId(pub u64);
 
+/// How a queued action left the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionEnd {
+    /// Every tile in the target was visited.
+    Completed,
+    /// Its tile or field no longer exists.
+    Dropped,
+    /// The player removed it.
+    Cancelled,
+}
+
+/// Sent exactly once when an action leaves the queue, so things layered on
+/// the queue (the scheduler, design doc §4.7) can follow an action by its
+/// id without polling.
+// Fields are read by the scheduler (design doc §4.7), added next.
+#[allow(dead_code)]
+#[derive(Event, Debug, Clone, Copy)]
+pub struct ActionEnded {
+    pub id: u64,
+    pub end: ActionEnd,
+}
+
+/// Remove one pending action. Work already done stays done.
+#[derive(Event, Debug, Clone, Copy)]
+pub struct CancelActionRequested(pub u64);
+
+/// Remove every pending action.
+#[derive(Event, Debug, Clone, Copy)]
+pub struct ClearQueueRequested;
+
+fn cancel_actions(
+    mut cancels: EventReader<CancelActionRequested>,
+    mut clear_all: EventReader<ClearQueueRequested>,
+    mut queue: ResMut<ActionQueue>,
+    mut ended: EventWriter<ActionEnded>,
+    mut clears: EventWriter<ClearMessageKey>,
+) {
+    let everything = clear_all.read().count() > 0;
+    let ids: Vec<u64> = cancels.read().map(|c| c.0).collect();
+    if !everything && ids.is_empty() {
+        return;
+    }
+    queue.pending.retain(|action| {
+        if everything || ids.contains(&action.id) {
+            ended.write(ActionEnded { id: action.id, end: ActionEnd::Cancelled });
+            clears.write(ClearMessageKey(format!("funds:{}", action.id)));
+            false
+        } else {
+            true
+        }
+    });
+}
+
 /// Amount `SoilState.fertility` is bumped by a single Fertilize action,
 /// clamped to [0,1] afterward. §5-style placeholder - a playtesting
 /// question, same as equipment capacities.
@@ -125,6 +178,10 @@ impl Plugin for CropsQueuePlugin {
             .init_resource::<FieldRegistry>()
             .init_resource::<FieldIndex>()
             .init_resource::<NextActionId>()
+            .add_event::<ActionEnded>()
+            .add_event::<CancelActionRequested>()
+            .add_event::<ClearQueueRequested>()
+            .add_systems(Update, cancel_actions)
             .add_systems(Update, process_action_queue.in_set(DayAdvanceOrder::CropsQueue));
     }
 }
@@ -152,6 +209,7 @@ fn process_action_queue(
     (registry, index, tile_map, config): (Res<FieldRegistry>, Res<FieldIndex>, Res<TileMap>, Res<FarmConfig>),
     mut messages: EventWriter<GameMessage>,
     mut clears: EventWriter<ClearMessageKey>,
+    mut ended: EventWriter<ActionEnded>,
 ) {
     let day_count = events.read().count();
     if day_count == 0 {
@@ -194,6 +252,7 @@ fn process_action_queue(
                             action.kind, action.id
                         )));
                         clears.write(ClearMessageKey(funds_key));
+                        ended.write(ActionEnded { id: action.id, end: ActionEnd::Dropped });
                         continue;
                     }
                 },
@@ -204,6 +263,7 @@ fn process_action_queue(
                             action.kind, action.id, action.applied
                         )));
                         clears.write(ClearMessageKey(funds_key));
+                        ended.write(ActionEnded { id: action.id, end: ActionEnd::Dropped });
                         continue;
                     }
                     tractor_order(index.tiles_of(id), &config)
@@ -294,6 +354,7 @@ fn process_action_queue(
             }
 
             if finished {
+                ended.write(ActionEnded { id: action.id, end: ActionEnd::Completed });
                 if let TileOrField::Field(id) = action.target {
                     messages.write(GameMessage {
                         day,
@@ -756,5 +817,66 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert!(ready[0].text.contains("3 t ready to harvest"), "{}", ready[0].text);
         assert!(matches!(app.world().resource::<TimeControl>().mode, TimeMode::Paused));
+    }
+    fn queue_with_id(app: &mut App, id: u64, target: TileOrField, kind: ActionKind) {
+        app.world_mut()
+            .resource_mut::<ActionQueue>()
+            .pending
+            .push_back(PendingAction::new(id, target, kind, None, 0.0));
+    }
+
+    fn drain_ended(app: &mut App) -> Vec<(u64, ActionEnd)> {
+        app.world_mut()
+            .resource_mut::<Events<ActionEnded>>()
+            .drain()
+            .map(|e| (e.id, e.end))
+            .collect()
+    }
+
+    #[test]
+    fn cancelling_removes_only_that_action_and_keeps_work_done() {
+        let (mut app, a) = test_app();
+        paint(&mut app, (0, 0), (4, 4), Some(a));
+        app.world_mut().resource_mut::<Equipment>().daily_capacity.insert(ActionKind::Till, 10);
+        queue_with_id(&mut app, 1, TileOrField::Field(a), ActionKind::Till);
+        queue_with_id(&mut app, 2, TileOrField::Field(a), ActionKind::Till);
+        step_day(&mut app);
+        drain_ended(&mut app);
+
+        app.world_mut().send_event(CancelActionRequested(1));
+        app.update();
+        let queue = app.world().resource::<ActionQueue>();
+        assert_eq!(queue.pending.iter().map(|p| p.id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(drain_ended(&mut app), vec![(1, ActionEnd::Cancelled)]);
+        assert!(soil_at(&app, 0, 4).tilled, "tilled tiles stay tilled");
+    }
+
+    #[test]
+    fn clear_all_empties_the_queue_and_reports_each_action() {
+        let (mut app, a) = test_app();
+        paint(&mut app, (0, 0), (1, 1), Some(a));
+        queue_with_id(&mut app, 7, TileOrField::Field(a), ActionKind::Till);
+        queue_with_id(&mut app, 8, TileOrField::Field(a), ActionKind::Water);
+        app.world_mut().send_event(ClearQueueRequested);
+        app.update();
+        assert!(app.world().resource::<ActionQueue>().pending.is_empty());
+        let mut ended = drain_ended(&mut app);
+        ended.sort_by_key(|e| e.0);
+        assert_eq!(ended, vec![(7, ActionEnd::Cancelled), (8, ActionEnd::Cancelled)]);
+    }
+
+    #[test]
+    fn finished_and_dropped_actions_report_their_end() {
+        let (mut app, a) = test_app();
+        paint(&mut app, (0, 0), (1, 1), Some(a));
+        queue_with_id(&mut app, 3, TileOrField::Field(a), ActionKind::Till);
+        step_day(&mut app);
+        assert_eq!(drain_ended(&mut app), vec![(3, ActionEnd::Completed)]);
+
+        queue_with_id(&mut app, 4, TileOrField::Field(a), ActionKind::Till);
+        app.world_mut().send_event(DeleteFieldRequested(a));
+        app.update();
+        step_day(&mut app);
+        assert_eq!(drain_ended(&mut app), vec![(4, ActionEnd::Dropped)]);
     }
 }
