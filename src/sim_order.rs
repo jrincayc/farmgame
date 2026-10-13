@@ -20,8 +20,14 @@ pub enum DayAdvanceOrder {
     Climate,
     /// farm::degrade_soil (Phase 3)
     Farm,
+    /// schedule::fire_schedules - queues the next step of due schedules
+    /// so it can be processed the same day.
+    Schedule,
     /// crops::process_action_queue (Phase 4)
     CropsQueue,
+    /// schedule::track_schedules - sees which actions the queue just
+    /// finished.
+    ScheduleTrack,
     /// crops::tick_growth (Phase 4) — includes death/failure checking
     /// inline (design doc §3.2's lethal_stress check) rather than as a
     /// separate `CropsFailure` set; there wasn't a clean reason to split
@@ -45,7 +51,9 @@ pub fn configure(app: &mut App) {
             TimeSystems::Trigger,
             DayAdvanceOrder::Climate,
             DayAdvanceOrder::Farm,
+            DayAdvanceOrder::Schedule,
             DayAdvanceOrder::CropsQueue,
+            DayAdvanceOrder::ScheduleTrack,
             DayAdvanceOrder::CropsGrowth,
             TimeSystems::Apply,
         )

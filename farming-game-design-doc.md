@@ -42,6 +42,7 @@ TimeControl countdown elapses (Timer)
         │
         ├──▶ climate::advance_day       (roll new weather, check frost calendar)
         ├──▶ farm::degrade_soil         (water balance: rain, drainage, evaporation, transpiration; fertility drifts)
+        ├──▶ schedule::fire_schedules   (queue the next step of due schedules, §3.11)
         ├──▶ crops::process_action_queue (resolve queued plant/water/fertilize/harvest, capacity-limited)
         ├──▶ crops::tick_growth         (advance growth_stage for all PlantedCrop)
         ├──▶ crops::check_failure       (kill crops outside viable temp range)
@@ -822,9 +823,39 @@ window happens to be open isn't game state.
 
 **Options (`GameOptions`, saved in `SaveGame.options`).** An Options window holds the Dark theme toggle, the Field outlines checkbox, and two auto-pause settings: `auto_pause_on_ready` and `auto_pause_on_death`. When enabled and the day's batch contains such an event, time control is set to Paused so the player can react. (Field outlines are not persisted across runs; the theme is.)
 
+## 3.11 Scheduling and Queue Cancellation (post-Phase-8)
+
+**Queue cancellation.** `CancelActionRequested(id)` and `ClearQueueRequested` remove pending actions (`crops::queue::cancel_actions`); the left panel has a ✖ per entry and a "Clear all" button. Work already done stays done. Whenever an action leaves the queue, exactly one `ActionEnded { id, end }` event is sent, with `end` one of `Completed` (every tile visited), `Dropped` (its tile or field no longer exists) or `Cancelled`. Anything built on the queue follows actions by id through this event rather than polling.
+
+**Schedules (`src/schedule/mod.rs`).** A `Schedule` is `{ id, field, steps, repeat, enabled, cursor, since_day, state }`; `Schedules` is the saved resource holding them (`SaveGame.schedules`, serde default). Each `Step` is `{ kind, crop_id, water_depth_mm, wait }`. A `Wait` is one of:
+
+| Wait | Met when |
+|---|---|
+| `Immediately` | always |
+| `AnyMature` | at least one living crop in the field is ready to harvest |
+| `AllMature` | the field has living crops and all of them are ready |
+| `DayOfYear(d)` | the day being advanced to is day `d` of the year (1-based) |
+| `AfterDays(n)` | at least `n` days after the previous step finished |
+| `SoilDry(f)` | the field's mean plant-available water (0–1) is below `f` |
+
+Waits other than `Immediately` and the day-based ones read field state at the start of the day, before growth runs. Dead crops are ignored.
+
+`RunState` is `Waiting` (current step not queued yet), `Running(action id)`, `Stalled(reason)` or `Done`. Two systems drive it, in new `DayAdvanceOrder` sets placed around the queue (`Farm → Schedule → CropsQueue → ScheduleTrack → CropsGrowth`):
+
+- `fire_schedules` (before the queue, per `DayAdvanced`): for each enabled `Waiting` schedule whose wait is met, push a `PendingAction` targeting the field and set `Running(id)`. A step is therefore queued and can be processed on the same day. At most one action per schedule is ever in the queue, which is what prevents a slow job (e.g. a multi-day harvest) from being queued again every day. A `Plant` step looks its crop up by `CropDef.id`; an unknown crop stalls the schedule. A `Running` schedule whose action is no longer in the queue (e.g. dropped while loading a save) stalls instead of waiting forever.
+- `track_schedules` (after the queue): on `ActionEnded::Completed` it calls `Schedule::advance` (cursor + 1, `since_day` = today, wrapping if `repeat`, otherwise `Done` plus a message). On `Cancelled`/`Dropped` it becomes `Stalled` and posts a standing message (key `schedule:{id}`). Schedules whose field was deleted are removed.
+
+Because each step is a normal queue action, equipment capacity, tractor order, skipped tiles and "waiting for funds" behave as for manual actions. A step that finishes on day N lets the next step start on day N+1 at the earliest, so a schedule advances at most one step per day.
+
+**UI (`ui/schedules.rs`).** A "Schedules" window opened from the top bar. Each schedule shows its field, current step and state, with enabled/repeat checkboxes, delete, and for a stalled schedule "Retry step" / "Skip step" (for a finished one, "Restart"). Steps can be added, removed, reordered and edited while the schedule is not `Running`. A new schedule can start empty or from a "Till → Plant → Harvest" template (first crop in the roster, harvest `AllMature`).
+
+**Known limits.** One schedule's steps are strictly sequential; there are no parallel branches or conditions on money. A field can have several schedules and nothing stops them conflicting. Nothing yet limits unattended play, since the economy has no running costs.
+
+---
+
 ## 4. What's Deliberately Deferred (per stretch goals)
 
-- **Conditional scheduling (§4.7):** distinct from the MVP action queue (§2.7) — a future `ScheduledAction` component (`{ trigger: Condition, action: ActionKind }`) would be checked in the same `DayAdvanced` pass and, when triggered, simply push a `PendingAction` onto the existing `ActionQueue` rather than bypassing it. So scheduling builds *on top of* the queue instead of needing a separate resolution path.
+- **Conditional scheduling (§4.7):** **implemented** as per-field step sequences in `src/schedule/` (§3.11). It pushes ordinary `PendingAction`s onto the existing `ActionQueue` rather than bypassing it, as originally planned. A general rule system (arbitrary condition + action pairs) is still deferred.
 - **Equipment upgrades:** `Equipment::daily_capacity` (§2.6) is written as a `HashMap` specifically so a purchase can just increase a value in it — no structural change needed when upgrades are added. **Implemented (fixed, non-purchasable) in Phase 4.**
 - **Greenhouses (§4.3a):** `TileClimateModifier` is defined in §2.3, and `Structure` (§2.6) is shaped to spawn one per covered tile, but neither is wired into a purchase flow or the growth-tick lookup yet. Growth tick already has the comment marking where it plugs in.
 - **Futures market / variable pricing (§4.5):** `Market::price_modifiers` (§2.5) already exists and is read by `sale_value()`; only something writing non-1.0 values into it needs to be built. **Phase 4 note:** `Wallet`/`Inventory` themselves are implemented now as stubs (§2.5). **Phase 5:** `Market`/`sale_value()`/the sell flow are now implemented (instant, not queued — see §2.5's resolved design question); the futures-market stretch goal remains exactly "write non-1.0 values into `price_modifiers`," unchanged by Phase 5's work.

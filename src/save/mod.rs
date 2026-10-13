@@ -48,6 +48,7 @@ use crate::economy::{Inventory, Market, Wallet};
 use crate::farm::{self, FarmConfig, SoilState, Tile, TileMap};
 use crate::field::{FieldId, FieldIndex, FieldRegistry, TileField};
 use crate::messages::{GameOptions, MessageLog};
+use crate::schedule::Schedules;
 use crate::soil::SoilRoster;
 use crate::time::{Calendar, TimeControl, TimeMode};
 use crate::ui::UiTheme;
@@ -242,6 +243,8 @@ struct SaveGame {
     messages: MessageLog,
     #[serde(default)]
     options: GameOptions,
+    #[serde(default)]
+    schedules: Schedules,
     tiles: Vec<SavedTile>,
     action_queue: Vec<SavedAction>,
     next_action_id: u64,
@@ -295,7 +298,7 @@ fn save_game(
     tiles: Query<(&Tile, &SoilState, Option<&PlantedCrop>, &TileField)>,
     tile_lookup: Query<&Tile>,
     fields: Res<FieldRegistry>,
-    (message_log, options): (Res<MessageLog>, Res<GameOptions>),
+    (message_log, options, schedules): (Res<MessageLog>, Res<GameOptions>, Res<Schedules>),
     crop_defs: Res<Assets<CropDef>>,
     soils: Res<SoilRoster>,
 ) {
@@ -379,6 +382,7 @@ fn save_game(
             fields: fields.clone(),
             messages: message_log.clone(),
             options: *options,
+            schedules: schedules.clone(),
             tiles: saved_tiles,
             action_queue: saved_actions,
             next_action_id: next_id.0,
@@ -447,11 +451,12 @@ fn load_game(
     existing_tiles: Query<Entity, With<Tile>>,
     // Grouped: a system function takes at most 16 parameters.
     (roster, crop_defs, soils): (Res<CropRoster>, Res<Assets<CropDef>>, Res<SoilRoster>),
-    (mut field_registry, mut field_index, mut message_log, mut options): (
+    (mut field_registry, mut field_index, mut message_log, mut options, mut schedules): (
         ResMut<FieldRegistry>,
         ResMut<FieldIndex>,
         ResMut<MessageLog>,
         ResMut<GameOptions>,
+        ResMut<Schedules>,
     ),
 ) {
     for ev in events.read() {
@@ -487,6 +492,7 @@ fn load_game(
         *field_registry = save.fields.clone();
         *message_log = save.messages.clone();
         *options = save.options;
+        *schedules = save.schedules.clone();
         let mut assignments: Vec<(IVec2, FieldId)> = Vec::new();
 
         // 3. Overwrite each tile's soil, and re-plant if the save had a

@@ -180,16 +180,18 @@ This is the mechanic that makes "Paused" mode meaningful rather than just a menu
 - The game keeps a **messages log** of noteworthy events — crops ready to harvest, crops that died (with the main cause), not enough money for a queued action — so the player doesn't have to watch the map while time runs. Similar events on the same day are **batched** (per field and crop) rather than listed one per tile, and ongoing conditions (such as waiting for funds) appear once and move to the newest position when refreshed. The log is saved with the game.
 - An **Options** window holds the Dark/Light theme, the field-outline toggle, and **auto-pause** settings: pause time when crops become ready to harvest, and/or when crops die.
 
-### 4.7 Scheduling & Automation
+### 4.7 Scheduling & Automation (implemented as a post-MVP feature; design doc §3.11)
 
-Distinct from the action queue in §4.6a: the queue handles "do these specific actions soon, throughput-limited," while scheduling handles "do this action automatically when some future condition is met" — a fuller automation layer, and out of MVP scope.
+Distinct from the action queue in §4.6a: the queue handles "do these specific actions soon, throughput-limited," while scheduling handles "do this action automatically when some future condition is met."
+
+**As built:** a *schedule* belongs to one field and is an ordered list of steps, each an action plus a wait condition (immediately; when any / all crops are mature; on a day of the year; N days after the previous step; when the field's soil is dry). It runs once through, or repeats. Each step is queued as an ordinary queue action when its condition is met, so equipment capacity and funds-waiting apply as usual; the next step starts after the previous one finishes. If the player cancels a schedule's action, the schedule stops and posts a message, and the player can retry or skip that step. Schedules are saved with the game. The player can also cancel any queued action, or clear the queue (§4.6a).
 
 - Actions (harvest, planting, watering, fertilizing) should eventually support two modes:
   - **Manual/queued (MVP, §4.6a):** player queues a tile/field action; it resolves as soon as equipment capacity allows
   - **Scheduled (stretch):** player sets a standing rule ahead of time — e.g., "harvest field 3 whenever a crop is mature" or "harvest on day N" — that keeps re-triggering automatically, rather than being a one-off queued action
 - Scheduled rules should be defined per-field (or per-tile-group) rather than globally, so different parts of the farm can run on different plans
 - This is a natural fit for day-advance-driven simulation (§4.1): scheduled rules can just be checked as part of the "on day advance" system pass, alongside growth/weather updates and the action queue
-- Worth deciding later whether scheduling conditions are limited to a fixed set (maturity reached, specific day) or become a small rule system (condition + action pairs) — starting with the fixed set keeps scope sane, but the underlying design (checked each day-advance) should not preclude expanding it later
+- **Resolved:** conditions are a fixed set (above), not a general rule system. The design (checked each day-advance) does not preclude expanding it later.
 
 ## 5. Non-Functional Requirements
 
@@ -210,11 +212,11 @@ To keep this achievable as a first game project:
 - Plant → grow → harvest → sell loop, with static-formula sell pricing (quality-multiplied, `time_factor` fixed at 1.0)
 - Manual save/load (JSON) — **done, Phase 7** (see §4.6)
 
-Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock, combat, crafting, multiple seasons/years, weather beyond basic rain, conditional/rule-based scheduling (§4.7), purchasable equipment upgrades, greenhouses/tile climate modifiers (§4.3a), futures market/variable pricing.
+Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock, combat, crafting, multiple seasons/years, weather beyond basic rain, scheduling (§4.7, since built), purchasable equipment upgrades, greenhouses/tile climate modifiers (§4.3a), futures market/variable pricing.
 
 ## 7. Stretch Goals (post-MVP)
 
-- Conditional/rule-based scheduling (§4.7) — action queue only for MVP
+- Conditional/rule-based scheduling (§4.7) — action queue only for MVP; a fixed-condition version has since been built
 - Purchasable equipment upgrades (increased daily action capacity, §4.6a)
 - Greenhouses and other tile-level climate modifiers (§4.3a) — MVP uses the region's base climate only
 - Futures market and variable/fluctuating sell prices (§4.5) — static formula-based pricing for MVP
@@ -233,7 +235,7 @@ Explicitly **out of scope for MVP:** NPCs/relationships, multiplayer, livestock,
 ## 9. Open Questions
 
 - What are reasonable default equipment capacities for MVP (tiles/day for till, water, fertilize, harvest), and what farm-grid size makes that throughput take multiple days rather than one? These two numbers need to be picked together — likely a playtesting question rather than a pure design one. **Phase 4 status:** placeholder starting values are now in code (`Equipment::default()` — Till/Plant 80, Water/Fertilize 150, Harvest 120, Clear 100 per day), matched against the existing 64×64 default farm size. Still unvalidated by actual play.
-- **Resolved:** queued actions (§4.6a) should be reorderable/cancelable in principle — `PendingAction`s carry a stable ID from the start (see design doc §2.7) so the underlying data supports this. The UI for reordering/canceling is deferred; MVP UI can ship FIFO-only display while the data model is already ready for it.
+- **Resolved:** queued actions (§4.6a) should be reorderable/cancelable in principle — `PendingAction`s carry a stable ID from the start (see design doc §2.7) so the underlying data supports this. **Update:** cancelling one action or clearing the whole queue is now in the UI; reordering is still not.
 - **Resolved:** farm grid size is a player-chosen parameter at world creation, within a min/max bound (§4.2), rather than a fixed constant. MVP still ships with a default size; the picker UI itself may be deferred if it doesn't fit MVP timeline, but the underlying `FarmConfig`-style resource is sized-aware from the start.
 - Timer mode speed options: how many speed tiers, and what's the real-time-minutes-per-game-day at each?
 - **Resolved (Phase 5):** whether selling goes through the action queue or is instant (raised at the end of Phase 4) — see §4.5. It's instant.

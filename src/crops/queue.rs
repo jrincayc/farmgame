@@ -124,8 +124,6 @@ pub enum ActionEnd {
 /// Sent exactly once when an action leaves the queue, so things layered on
 /// the queue (the scheduler, design doc §4.7) can follow an action by its
 /// id without polling.
-// Fields are read by the scheduler (design doc §4.7), added next.
-#[allow(dead_code)]
 #[derive(Event, Debug, Clone, Copy)]
 pub struct ActionEnded {
     pub id: u64,

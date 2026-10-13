@@ -103,6 +103,7 @@ pub fn top_bar(
     log: Res<MessageLog>,
     mut messages_open: ResMut<MessagesWindowOpen>,
     mut options_open: ResMut<OptionsWindowOpen>,
+    mut schedules_open: ResMut<super::SchedulesWindowOpen>,
 ) {
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
@@ -200,6 +201,10 @@ pub fn top_bar(
                 if !brush.window_open {
                     brush.paint = false;
                 }
+            }
+
+            if ui.button("Schedules").clicked() {
+                schedules_open.0 = !schedules_open.0;
             }
 
             let unread = log.unread();

@@ -24,6 +24,8 @@ pub enum MessageKind {
     WaitingForFunds,
     ActionDone,
     ActionDropped,
+    ScheduleStalled,
+    ScheduleDone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

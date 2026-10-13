@@ -22,6 +22,7 @@
 
 pub mod panels;
 pub mod render;
+pub mod schedules;
 pub mod sprites;
 
 use bevy::prelude::*;
@@ -71,6 +72,9 @@ pub struct MessagesWindowOpen(pub bool);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct OptionsWindowOpen(pub bool);
 
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct SchedulesWindowOpen(pub bool);
+
 /// Whether tiles are drawn as flat soil-type colours (design doc §6.7)
 /// instead of textured/tinted soil, so the player can see the soil layout
 /// at a glance. Not persisted.
@@ -90,6 +94,7 @@ impl Plugin for UiPlugin {
             .init_resource::<ShowSoilOverlay>()
             .init_resource::<MessagesWindowOpen>()
             .init_resource::<OptionsWindowOpen>()
+            .init_resource::<SchedulesWindowOpen>()
             .init_resource::<render::PanelInsets>()
             .init_resource::<CropSpriteRoster>()
             .add_systems(Startup, (render::setup_camera, render::configure_gizmos, sprites::load_soil_sprites))
@@ -113,6 +118,7 @@ impl Plugin for UiPlugin {
                     panels::tile_inspector_panel,
                     panels::action_queue_panel,
                     panels::fields_window,
+                    schedules::schedules_window,
                     panels::messages_window,
                     panels::options_window,
                     panels::economy_panel,
