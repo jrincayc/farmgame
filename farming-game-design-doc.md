@@ -41,7 +41,7 @@ TimeControl countdown elapses (Timer)
   DayAdvanced event fired
         │
         ├──▶ climate::advance_day       (roll new weather, check frost calendar)
-        ├──▶ farm::degrade_soil         (moisture drains, fertility drifts)
+        ├──▶ farm::degrade_soil         (water balance: rain, drainage, evaporation, transpiration; fertility drifts)
         ├──▶ crops::process_action_queue (resolve queued plant/water/fertilize/harvest, capacity-limited)
         ├──▶ crops::tick_growth         (advance growth_stage for all PlantedCrop)
         ├──▶ crops::check_failure       (kill crops outside viable temp range)
@@ -116,7 +116,7 @@ impl TempCurve {
 
 `Region` is a single global resource for MVP (one climate, per §6 scope). It's already shaped so that a future multi-region game would just mean multiple `Region`-like entities keyed by farm location, rather than a rewrite.
 
-**Stretch hook (greenhouses, §4.3a):** a `TileClimateModifier` component (see 2.3) will apply an offset to whatever `Region::base_temp_curve` returns for that tile, e.g. `effective_temp = region.temp_on(day) + modifier.offset`. Not implemented in MVP, but `temp_on()` is written as a pure function specifically so a modifier can wrap it without touching `Region` itself.
+**Stretch hook (greenhouses, §4.3a):** a `TileClimateModifier` component (see 2.3) will apply an offset to whatever `Region::base_temp_curve` returns for that tile, e.g. `effective_temp = region.temp_on(day) + modifier.offset`. Not yet implemented, but `temp_on()` is written as a pure function specifically so a modifier can wrap it without touching `Region` itself.
 
 ### 2.3 Farm Tiles & Soil (ECS Entities + Components)
 
@@ -154,8 +154,11 @@ pub struct Tile {
 #[derive(Component)]
 pub struct SoilState {
     pub fertility: f32,     // 0.0–1.0
-    pub moisture: f32,      // 0.0–1.0
-    pub soil_type: SoilType,
+    /// Water depth in the root zone, mm (§6.2), between the soil's
+    /// wilting point and saturation.
+    pub water_mm: f32,
+    /// Index into `SoilRoster` (data-driven soil definitions, §6.1).
+    pub soil: u8,
     // Added Phase 4: set true by ActionKind::Till, consumed (cleared)
     // by a successful ActionKind::Plant. A field needs re-tilling
     // between crops, not just once ever - gives Till a recurring
@@ -164,7 +167,13 @@ pub struct SoilState {
     pub tilled: bool,
 }
 
-pub enum SoilType { Sandy, Loamy, Clay }
+// Soil types are data, not an enum (§6.1): `SoilRoster` (src/soil/mod.rs)
+// loads assets/soil/*.json into `SoilDef`s, and `SoilState.soil` indexes it.
+
+/// Optional field membership (§6.5). `TileField` is the source of truth;
+/// `FieldIndex` is a derived per-field set of coordinates kept in sync.
+#[derive(Component, Default)]
+pub struct TileField(pub Option<FieldId>);
 
 // Stretch (§4.3a): attached only to tiles under a greenhouse/structure
 #[derive(Component)]
@@ -176,7 +185,7 @@ pub struct TileClimateModifier {
 
 Querying "all tiles with soil but no crop" or "all planted, matured crops" becomes a normal Bevy query (`Query<(&Tile, &SoilState), Without<PlantedCrop>>`), rather than manual iteration/filtering logic.
 
-**Planned change (§6.1–6.2, §6.5, §6.7):** `SoilType` as a closed enum and `SoilState.moisture` as a single 0.0–1.0 number are slated to be replaced by data-driven soil definitions and an explicit water-depth model, and a tile gains an optional field assignment. Nothing above changes until those stages land.
+**Implemented (§6.1–6.2, §6.5, §6.7):** the original closed `SoilType` enum and single 0.0–1.0 `moisture` number have been replaced by data-driven soil definitions, an explicit water-depth model and optional field assignment, as shown above. The sketches in this section that still mention `SoilType` or `moisture` (the fertility pseudocode below, the Phase 3 moisture paragraph) are kept as design history; §6 describes the current model.
 
 ### 2.3a Soil Dynamics
 
@@ -186,7 +195,7 @@ Querying "all tiles with soil but no crop" or "all planted, matured crops" becom
 
 **Phase 4 sign-convention correction:** the pseudocode below originally added `def.fertility_impact_per_day` to `soil.fertility` directly, with no negation. That contradicts this section's own stated convention — a positive ("draining") value would *increase* fertility, and the starter roster's one legume (a negative value, meant to demonstrate nitrogen-fixing replenishment) would have *decreased* it. Backwards on both counts, and it would have quietly undermined the "crop rotation is emergent" pitch this section leads with. The corrected formula negates the field: `delta = -def.fertility_impact_per_day`. A regression-style note lives alongside the fix in `farm::degrade_soil`.
 
-**While a tile is fallow (no `PlantedCrop`):** fertility drifts back toward a baseline (e.g. 0.6) at a rate depending on `SoilType` (§2.3) — e.g. Loamy regenerates fastest, Sandy slowest. This is the first real use of `SoilType` beyond being an inert label.
+**While a tile is fallow (no `PlantedCrop`):** fertility drifts back toward a baseline (e.g. 0.6) at a rate depending on the soil's `fallow_regen_rate` (`SoilDef`, §6.1) — e.g. Loamy regenerates fastest, Sandy slowest. 
 
 ```rust
 fn degrade_soil(
@@ -206,7 +215,7 @@ fn degrade_soil(
                 // Drift toward FALLOW_FERTILITY_BASELINE (e.g. 0.6),
                 // not a flat additive constant - see correction note
                 // below for why this matters.
-                let rate = soil.soil_type.fallow_regen_rate(); // e.g. Loamy: 0.05, Sandy: 0.015
+                let rate = roster.get(soil.soil).fallow_regen_rate; // e.g. Loamy: 0.05, Sandy: 0.015
                 (FALLOW_FERTILITY_BASELINE - soil.fertility) * rate
             }
         };
@@ -221,11 +230,11 @@ Runs on `DayAdvanced`, ordered before `tick_growth` per §1.1's existing chain (
 
 Exact regen rates and `fertility_impact_per_day` values per crop are a playtesting question (§5), same as the quality-threshold and equipment-capacity numbers already flagged there.
 
-**Moisture (Phase 3, new — not in the original design):** the design doc didn't previously specify a moisture formula beyond "affected by weather" (§3.4). Phase 3 implements it alongside fertility, in the same `degrade_soil` system: each `DayAdvanced`, `SoilState.moisture` changes by `weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION`, clamped to `[0.0, 1.0]`. `RAINFALL_TO_MOISTURE` (fraction of rolled rainfall that actually reaches the soil, vs. runoff) and `DAILY_EVAPORATION` (moisture lost on a dry day) are both placeholders alongside the other tunables flagged in §5. There's no watering/irrigation input yet — that's the action-queue `Water` action in Phase 4 (requirements §4.2's "irrigation or manual watering as a moisture mechanic").
+**Moisture (Phase 3, new — not in the original design; superseded by §6.2–6.3, see the note at the end of this section):** the design doc didn't previously specify a moisture formula beyond "affected by weather" (§3.4). Phase 3 implements it alongside fertility, in the same `degrade_soil` system: each `DayAdvanced`, `SoilState.moisture` changes by `weather.rainfall * RAINFALL_TO_MOISTURE - DAILY_EVAPORATION`, clamped to `[0.0, 1.0]`. `RAINFALL_TO_MOISTURE` (fraction of rolled rainfall that actually reaches the soil, vs. runoff) and `DAILY_EVAPORATION` (moisture lost on a dry day) are both placeholders alongside the other tunables flagged in §5. There's no watering/irrigation input yet — that's the action-queue `Water` action in Phase 4 (requirements §4.2's "irrigation or manual watering as a moisture mechanic").
 
 **Phase 8 update (recorded here after the fact; the paragraph above described the Phase 3 formula and had drifted from the code):** rainfall's contribution is softened — `weather.rainfall * RAINFALL_TO_MOISTURE * (1.0 - soil.moisture)` — so a day's rain adds less to an already-wet tile, while evaporation stays a flat subtraction (that flatness is what lets moisture recover instead of clinging just under the ceiling). `ActionKind::Water` applies the same `(1.0 - moisture)` softening to its own bump. See the doc comment on `farm::degrade_soil`.
 
-**Planned (§6.2–6.3):** the single moisture number is slated to become a water depth, with a wilting point, field capacity and saturation per soil, plus drainage, runoff and temperature-scaled evapotranspiration. That also retires the `(1.0 - moisture)` softening, which was a patch for overshoot that a saturation cap and drainage handle physically.
+**Implemented (§6.2–6.3):** the single moisture number is now a water depth (`water_mm`) with a wilting point, field capacity and saturation per soil, plus drainage, runoff and temperature-scaled evapotranspiration. Each day `degrade_soil` applies rain (`rainfall × MAX_DAILY_RAIN_MM`, capped at saturation), drainage, soil evaporation and crop transpiration, in that order, flooring at the wilting point, and uses each pending day's own temperature on multi-day catch-ups. The `(1.0 - moisture)` softening is gone: the saturation cap and drainage handle overshoot physically. `ActionKind::Water` adds a player-chosen depth in mm.
 
 ### 2.4 Crops (Bevy Assets + Component)
 
@@ -241,14 +250,14 @@ pub struct CropDef {
     pub max_temp: f32,
     pub ideal_temp_range: (f32, f32),
     pub frost_tolerant: bool,
-    // Phase 4 schema change: water_requirement (a single scalar) only
-    // modeled under-watering. Real crops can also suffer from too much
-    // water (root rot, waterlogging) - so moisture now mirrors the
-    // temperature fields exactly: an absolute viable range plus a
-    // narrower ideal range, both on SoilState.moisture's 0.0-1.0 scale.
-    pub min_moisture: f32,
-    pub max_moisture: f32,
-    pub ideal_moisture_range: (f32, f32),
+    // Water (§6.4). Drought axis, on plant-available water (0-1 between
+    // the soil's wilting point and field capacity):
+    pub min_available_water: f32,
+    pub ideal_available_water: f32,
+    // Waterlogging axis, on the air left in the soil pores:
+    pub min_air_porosity: f32,
+    pub ideal_air_porosity: f32,
+    pub daily_water_use_mm: f32,           // transpiration at 25 C; scaled by temperature and GrowthStage::water_use_factor
     pub fertility_requirement: f32,
     pub base_yield: u32,
     pub sell_price: u32,
@@ -270,6 +279,7 @@ pub struct QualityThresholds {
 pub struct GrowthStage {
     pub name: String,
     pub duration_days: u32,
+    pub water_use_factor: f32, // serde default 1.0; sprouts sip, mid-growth peaks
 }
 
 #[derive(Component)]
@@ -296,17 +306,19 @@ Example `assets/crops/tomato.json`:
     "id": "tomato",
     "name": "Tomato",
     "growth_stages": [
-        { "name": "sprout", "duration_days": 3 },
-        { "name": "growing", "duration_days": 6 },
-        { "name": "mature", "duration_days": 2 }
+        { "name": "sprout", "duration_days": 3, "water_use_factor": 0.3 },
+        { "name": "growing", "duration_days": 6, "water_use_factor": 1.0 },
+        { "name": "mature", "duration_days": 2, "water_use_factor": 0.7 }
     ],
     "min_temp": 10.0,
     "max_temp": 35.0,
     "ideal_temp_range": [18.0, 28.0],
     "frost_tolerant": false,
-    "min_moisture": 0.2,
-    "max_moisture": 0.9,
-    "ideal_moisture_range": [0.4, 0.7],
+    "min_available_water": 0.15,
+    "ideal_available_water": 0.40,
+    "min_air_porosity": 0.08,
+    "ideal_air_porosity": 0.15,
+    "daily_water_use_mm": 4.0,
     "fertility_requirement": 0.4,
     "base_yield": 12,
     "sell_price": 8,
@@ -324,7 +336,7 @@ Example `assets/crops/tomato.json`:
 
 (Tomato as a short-window, steep-decay crop; a wheat-style crop would use a longer window and gentler per-day stress.)
 
-**Planned schema change (§6.4):** the three moisture fields (`min_moisture`, `max_moisture`, `ideal_moisture_range`) are slated to be replaced by a drought pair and a waterlogging pair, and `CropDef` gains `daily_water_use_mm`, with an optional per-stage `water_use_factor` on `GrowthStage`.
+**Implemented schema change (§6.4):** the original three moisture fields (`min_moisture`, `max_moisture`, `ideal_moisture_range`) were replaced by a drought pair and a waterlogging pair, and `CropDef` gained `daily_water_use_mm`, with an optional per-stage `water_use_factor` on `GrowthStage`. `validate_crop_defs` checks the new pairs.
 
 ### 2.5 Economy (Resource)
 
@@ -411,9 +423,14 @@ pub struct NextActionId(pub u64);
 
 pub struct PendingAction {
     pub id: u64,   // stable handle for future reorder/cancel UI — see note below
-    pub tile: Entity,
+    pub target: TileOrField,         // resolved at processing time (§6.6)
     pub kind: ActionKind,
     pub crop_to_plant: Option<Handle<CropDef>>, // only relevant for ActionKind::Plant
+    pub water_depth_mm: f32,                    // only relevant for ActionKind::Water
+    pub visited: HashSet<IVec2>,                // tiles this action has already handled
+    pub applied: u32,
+    pub skipped: u32,
+    pub waiting_funds: bool,
 }
 ```
 
@@ -421,9 +438,9 @@ pub struct PendingAction {
 
 Processing (`crops::process_action_queue`, run early in the `DayAdvanced` chain, per §1.1): for each `ActionKind`, pop up to `Equipment.daily_capacity[kind]` matching entries off the front of `pending` and apply them; anything left in the queue simply waits for the next `DayAdvanced`. FIFO order per action kind keeps this predictable and legible to the player (§2 pillar) — "I queued these first, they happen first" — rather than needing a priority system for MVP. (A future reorder feature would let the player change that order before resolution; it wouldn't change how resolution itself works.)
 
-**Phase 8 note:** `PendingAction` also carries `water_intensity: f32` (default `1.0`; the "½ Water" button queues `0.5`), a multiplier on the Water action's moisture bump, ignored for every other kind.
+**Phase 8 note (superseded):** `PendingAction` briefly carried `water_intensity: f32` (a multiplier on the Water bump, with a "½ Water" button). It has been replaced by `water_depth_mm` (see below); old saves' `water_intensity` is converted on load (1.0 → 20 mm, 0.5 → 10 mm).
 
-**Planned change (§6.6):** `PendingAction.tile: Entity` becomes a `TileOrField` target resolved at processing time, each action tracks which tiles it has already visited, and `water_intensity` becomes `water_depth_mm`.
+**Implemented (§6.6):** `PendingAction.target` is a `TileOrField`, resolved at processing time. A field's tiles are worked in tractor order (rows numbered from the top, alternating direction, parity taken from the farm-global row), and the action's `visited` set records the tiles it has handled, so a field action that spans several days resumes where it left off and picks up tiles added to the field in the meantime. Each tile resolves to an `Outcome`: `Applied`, `Skipped` (the action doesn't apply, e.g. planting on untilled ground; uses no capacity) or `OutOfFunds`. Two behaviours worth knowing: a `Plant` waits on untilled tiles that an earlier pending `Till` will reach (`till_pending_for`), rather than skipping them, and a `Plant` that runs out of money stops and waits (`waiting_funds`) rather than skipping the rest of the field. The queue panel shows applied / skipped / remaining counts per entry.
 
 ### 2.8 Save Data (Serialized snapshot) — **implemented, Phase 7**
 
@@ -480,7 +497,7 @@ This indirection is deliberate: it means save-file format is decoupled from inte
 
 **What else changed from the original sketch:** `market: Market`, `ui_theme: UiTheme`, `farm_config: FarmConfig`, and `inventory: Inventory` weren't in this section's original `SaveGame` draft — `Inventory` in particular was a real gap (harvested-but-unsold goods would have vanished on load). All four are plain data with no `Entity`/`Handle` fields, so each derives `Serialize`/`Deserialize` directly on the live resource type rather than needing its own mirror struct — see each type's own Phase 7 doc-comment note (`economy::Wallet`/`Inventory`, `economy::Market`, `ui::UiTheme`, `farm::FarmConfig`, `farm::SoilState`) for the specifics. `TimeControl`/`TimeMode` are deliberately **not** persisted — `load_game` always resumes in `Paused`, regardless of what mode was active at save time, so a loaded game never starts ticking days via a Timer the player hasn't just set. `climate::Region` also isn't persisted — it's a single fixed MVP climate (requirements §6), not per-save data.
 
-**Planned additions (§6.8):** per-tile soil id and water depth, per-tile field assignment plus the field registry, and `SavedAction` targets, visited tiles and water depth, each with a migration path for existing saves.
+**Implemented additions (§6.8):** `SavedSoil` stores the soil id string and `water_mm` (legacy `soil_type` / `moisture` are still read and migrated), `SavedTile.field` stores the tile's field id, and `SaveGame` gains `fields` (the registry), `messages` (the message log, §3.10) and `options` (`GameOptions`). `SavedAction` stores its target (tile coordinate or field), `visited`, `applied`, `skipped` and `water_depth_mm` (legacy `water_intensity` is migrated). All new fields are `#[serde(default)]`, so older saves load.
 
 ---
 
@@ -533,7 +550,7 @@ This system owns the "equipment capacity throttles the day" rule from §4.6a of 
 
 **Phase 4 correction — frost was dead data:** this section's original pseudocode computed `temp_stress` from `Region::temp_on` alone and never referenced `WeatherToday.is_frost`, despite `frost_tolerant` existing specifically to interact with frost. A frost event is a sharp, discrete overnight cold snap layered on top of the smooth seasonal curve (§3.4) — a day can sit comfortably within a crop's viable temperature range on the curve and still frost that night. Without checking `is_frost`, `frost_tolerant` had no effect on anything. The pseudocode below adds a flat stress hit on a frost day for non-frost-tolerant crops.
 
-**Phase 4 addition — moisture stress mirrors temperature stress:** per the schema change in §2.4, moisture now has its own min/max/ideal range, checked the same way temperature is. A scale factor (`MOISTURE_STRESS_SCALE`) converts the 0.0–1.0 moisture range into stress units comparable to temperature's degree-Celsius range — without it, moisture deviations would always be negligible next to temperature ones.
+**Phase 4 addition — moisture stress mirrors temperature stress** (since generalised to two axes by §6.4): water has its own thresholds, checked the same way temperature is, on a drought axis (plant-available water) and a waterlogging axis (soil air). A scale factor (`MOISTURE_STRESS_SCALE`) converts the 0.0–1.0 deficit into stress units comparable to temperature's degree-Celsius range — without it, moisture deviations would always be negligible next to temperature ones. The pseudocode below shows the original single-axis form.
 
 **Phase 4 addition — fertility gate:** soil below `fertility_requirement` now adds a mild, "outside ideal but viable" stress, the same treatment as being outside a crop's ideal (but still viable) temperature or moisture range.
 
@@ -644,7 +661,7 @@ the final stage has actually completed, not merely been entered), presses
     push PendingAction { tile, kind: Harvest, crop_to_plant: None } onto ActionQueue.pending
 
 At resolution time (§3.1a), for each harvest action that fits within capacity:
-    yield_amount = def.base_yield * yield_factor(crop.cumulative_stress, soil.fertility, soil.moisture)
+    yield_amount = def.base_yield * yield_factor(crop.cumulative_stress, soil.fertility, available_water_fraction)
     quality = quality_grade(crop.worst_single_day_stress, def.quality_thresholds)
     → add `yield_amount` units of crop.id (tagged with `quality`) to player Inventory
     → despawn PlantedCrop component from tile (soil remains)
@@ -655,14 +672,14 @@ At resolution time (§3.1a), for each harvest action that fits within capacity:
 **Phase 4 addition — `yield_factor(...)` was previously named but never defined.** Implemented as two independent [0,1]-clamped factors multiplied together:
 
 ```rust
-fn yield_factor(cumulative_stress: f32, fertility: f32, moisture: f32) -> f32 {
+fn yield_factor(cumulative_stress: f32, fertility: f32, available_water: f32) -> f32 {
     let stress_factor = (1.0 - cumulative_stress / YIELD_STRESS_DIVISOR).clamp(0.0, 1.0);
-    let soil_factor = ((fertility + moisture) / 2.0).clamp(MIN_SOIL_YIELD_FACTOR, 1.0);
+    let soil_factor = ((fertility + available_water) / 2.0).clamp(MIN_SOIL_YIELD_FACTOR, 1.0);
     stress_factor * soil_factor
 }
 ```
 
-`stress_factor` tapers to zero as `cumulative_stress` approaches `YIELD_STRESS_DIVISOR` (a §5-style placeholder). `soil_factor` reflects the tile's fertility/moisture *at harvest time*, but is floored at `MIN_SOIL_YIELD_FACTOR` (also a placeholder, e.g. 0.3) rather than being able to zero out yield on its own — a crop that otherwise grew well on mediocre-but-viable soil shouldn't harvest nothing just because the tile wasn't pristine. `yield_amount` is `(def.base_yield as f32 * yield_factor(...)).round() as u32`. **Planned (§6.4):** the `moisture` input to `soil_factor` has to change when moisture becomes a water depth.
+`stress_factor` tapers to zero as `cumulative_stress` approaches `YIELD_STRESS_DIVISOR` (a §5-style placeholder). `soil_factor` reflects the tile's fertility/moisture *at harvest time*, but is floored at `MIN_SOIL_YIELD_FACTOR` (also a placeholder, e.g. 0.3) rather than being able to zero out yield on its own — a crop that otherwise grew well on mediocre-but-viable soil shouldn't harvest nothing just because the tile wasn't pristine. `yield_amount` is `(def.base_yield as f32 * yield_factor(...)).round() as u32`. **Implemented (§6.4):** the water input to `soil_factor` is now the tile's plant-available-water fraction at harvest (`crop_def::yield_amount`).
 
 **Dead crops use `Clear`, not `Harvest`:** a `PlantedCrop` with `dead: true` can't be queued for `Harvest` (resolution rejects it, per §3.1a) — it goes through `ActionKind::Clear` instead, which removes the `PlantedCrop` component with no yield, matching §2.4's "stays until explicitly cleared" behavior.
 
@@ -672,14 +689,14 @@ Harvesting late (after `optimal_harvest_window_days` has elapsed since maturity)
 
 ### 3.4 Weather (on `DayAdvanced`, before growth tick)
 
-**Implemented in Phase 2.** MVP weather: check `Region.frost_days` for frost risk (with a per-risk-day probability roll, not automatic — `FROST_CHANCE_ON_RISK_DAY`, a §5-style placeholder), and roll rainfall (affecting `SoilState.moisture` deltas). No separate weather "system" beyond a `WeatherToday` resource that other systems read.
+**Implemented in Phase 2.** MVP weather: check `Region.frost_days` for frost risk (with a per-risk-day probability roll, not automatic — `FROST_CHANCE_ON_RISK_DAY`, a §5-style placeholder), and roll rainfall (converted to mm of water on the tile, §6.2). No separate weather "system" beyond a `WeatherToday` resource that other systems read.
 
 **Rainfall correction (Phase 2):** an earlier draft rolled a single continuous `0.0..=1.0` value every day, which meant every day got *some* rainfall, just sometimes a trace amount. Real precipitation is intermittent, not "a little every day," so this is a two-stage roll instead: first, does it rain at all today (`RAIN_CHANCE_PER_DAY`, another placeholder — most days come out dry); only if that passes does it roll the `0.0..=1.0` amount. Otherwise `rainfall` is `0.0`.
 
 ```rust
 #[derive(Resource)]
 pub struct WeatherToday {
-    pub rainfall: f32,      // 0.0–1.0, added to soil moisture that day; 0.0 on non-rain days
+    pub rainfall: f32,      // 0.0–1.0, scaled by MAX_DAILY_RAIN_MM (40 mm) into water added to each tile; 0.0 on non-rain days
     pub is_frost: bool,
 }
 ```
@@ -692,15 +709,15 @@ pub struct WeatherToday {
 
 `ui::UiPlugin` wires `bevy_egui` and a placeholder rendering layer, per §1's original note that `ui/` reads from the other modules but doesn't own simulation state — every panel below is read/write access to resources/events other plugins already own (`ActionQueue`, `Wallet`, `Inventory`, `TimeControl`, `SellRequested`), not new simulation logic.
 
-**Placeholder tile rendering (`ui/render.rs`):** a 2D camera framed to the default farm size, with pan (arrow keys, middle-click-drag, or Ctrl/Cmd+left-click-drag) and zoom (scroll wheel or top-bar buttons), clamped to the farm's extent and bounded between 'whole farm visible' and 16x that. Note (post-Phase-6b): camera pan/zoom was originally deferred to the future rendering/art-pipeline phase (§10) on the reasoning that building controls against placeholder art would be throwaway work. In practice, a fixed camera on a farm of thousands of tiles made playtesting genuinely painful (tiles easy to miss entirely), so pan/zoom was pulled forward and implemented against the placeholder rendering. The camera logic operates on Camera/Transform/Projection, not on what's drawn, so it's expected to carry over largely intact once real sprites land, rather than being thrown away, one flat-colored `Sprite` per tile (color by `SoilType`, darker overlay when tilled, distinct color when the planted crop is dead) plus a `Text2d` label (crop initial C/G/T/W, `.` for tilled-bare, `X` for dead, blank otherwise). Explicitly not the real art pipeline — just enough to make tile-targeted UI meaningful. Click-to-select (left mouse button, ignored if egui itself wants the pointer that frame) writes a `SelectedTile` resource every other panel reads.
+**Placeholder tile rendering (`ui/render.rs`):** a 2D camera framed to the default farm size, with pan (arrow keys, middle-click-drag, or Ctrl/Cmd+left-click-drag) and zoom (scroll wheel or top-bar buttons), clamped to the farm's extent and bounded between 'whole farm visible' and 16x that. Note (post-Phase-6b): camera pan/zoom was originally deferred to the future rendering/art-pipeline phase (§10) on the reasoning that building controls against placeholder art would be throwaway work. In practice, a fixed camera on a farm of thousands of tiles made playtesting genuinely painful (tiles easy to miss entirely), so pan/zoom was pulled forward and implemented against the placeholder rendering. The camera logic operates on Camera/Transform/Projection, not on what's drawn, so it's expected to carry over largely intact once real sprites land, rather than being thrown away, one flat-colored `Sprite` per tile (color by `SoilType`, darker overlay when tilled, distinct color when the planted crop is dead) plus a `Text2d` label (crop initial C/G/T/W, `.` for tilled-bare, `X` for dead, blank otherwise). Explicitly not the real art pipeline — just enough to make tile-targeted UI meaningful. Click-to-select (left mouse button, ignored if egui itself wants the pointer that frame) writes a `SelectedTile` resource every other panel reads. **Click-to-target (post-Phase-8):** clicking a tile that belongs to a field sets the Target dropdown to that field; clicking an unassigned tile switches the target back to the selected tile. Field edges are drawn with gizmos (line width 3) on borders between differing fields, the targeted field gets an inner white outline, and the selected tile gets a black-and-yellow box. In paint mode, dragging a rectangle assigns (or, with "Unassigned", releases) tiles. A "Soil types" overlay tints tiles by soil type. Camera panning is clamped to tile extents and to the area not covered by egui panels (`PanelInsets`, recorded in the egui pass). All egui systems use `try_ctx_mut()` so closing the window does not panic.
 
 **Panels (`ui/panels.rs`):**
-- Top bar: day/season readout (season is a derived display label per §2.1, not a stored value), time control (Step/Pause/Timer speed buttons), theme toggle.
-- Right side panel: selected-tile inspector — soil type/fertility/moisture/tilled state, and if planted, crop name/stage/days-in-stage/cumulative + worst stress. Dead crops get an explicit red label, not just the tile's red color, per §2.4's "death must be visible" principle.
-- Left side panel: action queue — buttons to queue Till/Water/Fertilize/Harvest/Clear on the selected tile, a crop-picker dropdown + Plant button, and a scrollable FIFO-order display of `ActionQueue.pending` (id + kind). No reorder/cancel controls (requirements §4.6a/§9, deliberately deferred) even though `PendingAction::id` already supports it.
+- Top bar: day/season readout (season is a derived display label per §2.1, not a stored value), time control (Step/Pause/Timer speed buttons), and buttons for the Messages window (with an unread count), Options window and Fields window, plus a "Soil types" overlay checkbox. (The theme toggle and field-outline checkbox moved into Options.)
+- Right side panel: selected-tile inspector — soil type/fertility/water/tilled state and field membership (a field summary when a field is targeted), and if planted, crop name/stage/days-in-stage/cumulative + worst stress. Dead crops get an explicit red label, not just the tile's red color, per §2.4's "death must be visible" principle.
+- Left side panel: action queue — a Target dropdown (the selected tile, or a field; backed by `ActionTargetField`), buttons to queue Till/Water/Fertilize/Harvest/Clear on that target, a water-depth (mm) control, a crop-picker dropdown + Plant button, and a scrollable FIFO-order display of `ActionQueue.pending` (id, kind, target and applied/skipped/remaining counts). No reorder/cancel controls (requirements §4.6a/§9, deliberately deferred) even though `PendingAction::id` already supports it.
 - Bottom bar: wallet balance, inventory aggregated per crop id, a Sell button per crop id firing `SellRequested` (§2.5's Phase 5 instant-sell flow, unchanged by this phase).
 
-**Theme (`UiTheme` resource):** light/dark toggle via `egui::Visuals::light()`/`dark()`, applied every frame from the resource rather than only on toggle. Default Light (requirements §4.0). Not yet persisted across runs — Phase 7 (save/load) can read this resource directly once it exists.
+**Theme (`UiTheme` resource):** light/dark toggle via `egui::Visuals::light()`/`dark()`, applied every frame from the resource rather than only on toggle. Default Light (requirements §4.0). Persisted in the save file (Phase 7) and togglable from the Options window.
 
 Dev keyboard controls from Phases 4-5 (`main.rs`) are kept alongside the new UI for fast manual testing, not removed — the UI is the primary way to play from this phase on, but the keyboard path costs nothing to leave in place.
 
@@ -746,7 +763,7 @@ the stress-comparison logic that already lives in `growth::tick_growth`
 — one function, called by both the simulation and the display, DRY.
 
 **Implementation:** `crop_def::compute_daily_stress(def, temp, is_frost,
-moisture, fertility, overripe_days) -> StressBreakdown` is now the
+available, air, fertility, overripe_days) -> StressBreakdown` is now the
 single place that decides what counts as stress. It returns not just
 the stress values but a `RangeStatus` (`BelowMin` / `AboveMax` /
 `BelowIdeal` / `AboveIdeal` / `Ideal`) per temp/moisture axis, so a
@@ -779,7 +796,7 @@ existing cumulative/worst-day/quality figures. See `ui::panels`'
 `temp_status_label`/`moisture_status_label` for the `RangeStatus`-to-
 wording mapping (display-only, doesn't affect simulation).
 
-**Planned (§6.4):** `compute_daily_stress` takes `moisture` today; it is slated to take a drought value and a waterlogging value instead, and to gain a shared evapotranspiration helper alongside it (§6.3), so the inspector can keep showing exactly what the simulation uses.
+**Implemented (§6.3–6.4):** `compute_daily_stress(def, temp, is_frost, available, air, fertility, overripe_days)` takes a drought value and a waterlogging value in place of `moisture`, with separate status wording per axis, and `StressBreakdown::dominant_cause()` names the largest contributor for messages. The shared evapotranspiration helper `soil::daily_et_mm` is used by both `degrade_soil` and the inspector, so the inspector shows exactly what the simulation uses.
 
 ## 3.9 Toggleable Save/Load Window (Phase 8)
 
@@ -794,6 +811,16 @@ button wired to the same resource — so either the top-bar toggle or the
 window's own chrome closes it, no separate plumbing needed for the two
 paths. Not persisted in `save::SaveGame` — whether this particular
 window happens to be open isn't game state.
+
+## 3.10 Messages & Options (post-Phase-8)
+
+**Messages (`src/messages/mod.rs`).** Simulation systems report noteworthy events by sending a `GameMessage` event (day, text, optional key/category) instead of drawing UI; `MessagesPlugin` records them in a `MessageLog` resource (capped at 200, saved in `SaveGame.messages`). Sources so far: crops ready to harvest, crops died (with the dominant cause from `StressBreakdown::dominant_cause()`), and not enough money to plant.
+
+- **Batching:** messages are batched per (day, field, crop[, cause]) — "12 tomatoes ready in North field" rather than twelve lines.
+- **Standing messages:** a message with a key (e.g. `funds:{action id}`) describes an ongoing condition. Re-sending it moves it to the newest position in the log instead of adding a duplicate, and a `ClearMessageKey` event removes it when the condition ends (the action resumes or is deleted).
+- **UI:** a Messages window opened from the top bar, with an unread count on its button.
+
+**Options (`GameOptions`, saved in `SaveGame.options`).** An Options window holds the Dark theme toggle, the Field outlines checkbox, and two auto-pause settings: `auto_pause_on_ready` and `auto_pause_on_death`. When enabled and the day's batch contains such an event, time control is set to Paused so the player can react. (Field outlines are not persisted across runs; the theme is.)
 
 ## 4. What's Deliberately Deferred (per stretch goals)
 
@@ -814,7 +841,6 @@ window happens to be open isn't game state.
 - Exact multiplier values for quality grades (0.5x/1.0x/1.5x) and the stress thresholds themselves are placeholders — real values only make sense after playtesting a few crops.
 - Same for `Equipment::daily_capacity` starting values and `TimerSpeed` real-time durations — both playtesting questions, not architecture ones (mirrors the open questions in the requirements doc).
 - **New (Phase 4):** `YIELD_STRESS_DIVISOR`, `MIN_SOIL_YIELD_FACTOR`, `MOISTURE_STRESS_SCALE`, `FROST_STRESS`, `FERTILITY_DEFICIT_STRESS`/moisture's equivalent, and the `Water`/`Fertilize` per-action bump amounts are all §5-style placeholders introduced this phase — same "playtesting question, not architecture question" category as everything else in this list, just not yet tuned against real crop runs.
-- **New (Phase 4) — Bevy's exact `AssetLoader` trait signature:** `CropDefLoader` (crops/crop_def.rs) is written from memory against the pattern Bevy's own `custom_asset` example uses, but wasn't compiled before packaging (per your request to skip `cargo check` on this batch). If it doesn't compile as-is, the doc comment on `CropDefLoader` in that file lists the two most likely fixes (BoxedFuture vs. native `async fn`, and the `read_to_end` import). Worth checking this file first if `cargo check` fails anywhere in `crops/`.
 - **Resolved:** `ActionQueue` player reordering/cancellation (requirements doc §9) — `PendingAction` carries a stable `id` from the start (§2.7), so the data model supports this even though the MVP UI itself is FIFO-display-only.
 - **Resolved:** grid size (requirements doc §4.2, §9) — `FarmConfig { width, height }` (§2.3) is a resource, not a compiled-in constant, bounded by `FarmConfig::MIN_DIMENSION`/`MAX_DIMENSION`, with an MVP default of 64×64. A player-facing size picker is stretch UI on top of the same resource.
 - **Resolved:** Bevy version — pinned to `=0.16.0` exactly, with `bevy_egui = "=0.34.1"` as the matching UI integration version.
@@ -987,13 +1013,13 @@ Two existing tests reference `soil.moisture` directly and must be rewritten in s
 
 ### 6.11 Open questions
 
-- Name for the field-assignment tool pair ("zone" / "release"?) — see the `Clear` collision in §6.5.
+- ~~Name for the field-assignment tool pair~~ — resolved: "Paint mode" with an active field, and "Unassigned" to release tiles.
 - Whether waterlogging needs a duration counter (§6.4); decide after playtesting.
 - Fixed `ROOT_ZONE_DEPTH_MM` versus root depth by crop or growth stage.
 - Refinements deliberately left out of the first version: ET tapering as soil dries, canopy shading of soil evaporation, soil-dependent infiltration limits (clay absorbing rain more slowly), and capacity measured in volume.
-- Whether world-generation proportions of soil types should be configurable per farm.
+- Whether world-generation proportions of soil types should be configurable per farm (currently fixed 25/50/25, fixed default seed).
 - Presentation of the soil-type and field-boundary overlays.
-- Tractor-order row numbering and Bevy's y-up coordinates — confirm the convention when implementing.
+- ~~Tractor-order row numbering and Bevy's y-up coordinates~~ — resolved: rows are numbered from the top as `height - y`, with parity taken from the farm-global row.
 
 ---
 
